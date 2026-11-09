@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<title>Smart Classroom Fan | Cloud IoT</title>
+<style>
+:root{--bg:#f3f6fb;--surface:#fff;--ink:#18263b;--muted:#738198;--line:#e3eaf3;--blue:#316fe8;--blue-soft:#edf3ff;--green:#14865e;--green-soft:#e9f8f0;--red:#c84949;--red-soft:#fff0f0;--amber:#a96b13;--amber-soft:#fff6e7;--shadow:0 8px 26px rgba(31,55,90,.06)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px Inter,system-ui,-apple-system,Segoe UI,Arial,sans-serif}.shell{max-width:1420px;margin:auto;padding:28px 30px 40px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px}.eyebrow{font-size:10px;font-weight:800;letter-spacing:1.4px;color:var(--blue)}h1{font-size:26px;margin:5px 0 4px}.subtitle{color:var(--muted);font-size:12px}.top-actions{display:flex;align-items:center;gap:10px}.pill{white-space:nowrap;border-radius:30px;padding:9px 13px;background:var(--red-soft);color:var(--red);font-size:11px;font-weight:800}.pill.online{background:var(--green-soft);color:var(--green)}.logout{border:1px solid var(--line);background:white;color:#52627a;border-radius:9px;padding:9px 12px;font-size:11px;font-weight:800;cursor:pointer}
+.banner{background:linear-gradient(110deg,#2055bd,#4d8cf5);border-radius:16px;padding:22px 24px;color:white;margin-bottom:22px;box-shadow:var(--shadow)}.banner h2{margin:0 0 6px;font-size:19px}.banner p{margin:0;color:#e8f0ff;font-size:12px;line-height:1.6}.section-head{display:flex;justify-content:space-between;align-items:end;gap:12px;margin:24px 0 12px}.section-head h2{font-size:16px;margin:0}.muted{color:var(--muted);font-size:11px}.rooms{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.room{background:var(--surface);border:1px solid var(--line);border-radius:15px;padding:18px;box-shadow:var(--shadow);min-width:0}.room-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:15px}.room-title{display:flex;align-items:center;gap:10px}.room-icon{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:var(--blue-soft);font-size:19px}.room h3{font-size:16px;margin:0}.room-sub{font-size:10px;color:var(--muted);margin-top:3px}.status-tag{font-size:10px;font-weight:800;padding:6px 9px;border-radius:20px;background:#f1f4f8;color:#607087}.status-tag.active{background:var(--green-soft);color:var(--green)}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.metric{border:1px solid var(--line);border-radius:11px;padding:12px;min-width:0}.metric-label{font-size:10px;color:var(--muted);margin-bottom:8px}.metric-value{font-size:22px;font-weight:800;letter-spacing:-.5px;white-space:nowrap}.metric-unit{font-size:11px;color:var(--muted);font-weight:500}.metric-detail{font-size:10px;color:var(--muted);margin-top:5px;min-height:14px}.controls{border-top:1px solid var(--line);margin-top:16px;padding-top:15px}.control-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:9px 0}.control-label b{display:block;font-size:12px}.control-label small{display:block;color:var(--muted);font-size:10px;margin-top:3px}.buttons{display:flex;gap:8px}.btn{border:0;border-radius:8px;padding:9px 13px;font-size:11px;font-weight:800;cursor:pointer}.btn.on{background:var(--green);color:#fff}.btn.off{background:#e9edf3;color:#40516b}.btn:disabled{opacity:.5;cursor:not-allowed}.control-note{border-radius:9px;background:#f6f8fb;color:var(--muted);padding:9px 11px;font-size:10px;line-height:1.5;margin-top:12px}.pending{color:var(--amber);background:var(--amber-soft)}.lower-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow);min-width:0}.panel h3{font-size:13px;margin:0 0 12px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:10px;white-space:nowrap}th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 7px}th{color:var(--muted);font-weight:700}td{color:#33425a}.empty{text-align:center;color:var(--muted);padding:18px}.footer{text-align:center;color:#9aa6b6;font-size:10px;padding-top:25px}.error{color:var(--red)}
+@media(max-width:1000px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:760px){.shell{padding:18px 12px 30px}.rooms,.lower-grid{grid-template-columns:1fr}.top{align-items:flex-start}.top h1{font-size:21px}.banner{padding:18px}.section-head{align-items:flex-start;flex-direction:column}.metric-value{font-size:20px}.top-actions{align-items:flex-end;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div><div class="eyebrow">CLOUD-BASED INTERNET OF THINGS</div><h1>Smart Classroom Fan</h1><div class="subtitle">Satu ESP32 · Dua ruang kelas · Monitoring dan kendali jarak jauh</div></div>
+    <div class="top-actions"><span id="connection" class="pill">● ESP32 Offline</span><form method="post" action="/logout" id="logout-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="logout" type="submit">Keluar</button></form></div>
+  </header>
+  <section class="banner"><h2>Monitoring dan Kontrol Dua Ruang Kelas</h2><p>Data DHT22 dan PIR dikirim ke cloud untuk dipantau melalui internet. Kipas dikendalikan secara manual dari dashboard atau tombol fisik di setiap kelas. Sensor tidak menyalakan atau mematikan kipas secara otomatis.</p></section>
+
+  <div class="section-head"><h2>Status Perangkat dan Ruangan</h2><span class="muted">Pembaruan status setiap 3 detik · Waktu WIB</span></div>
+  <section class="rooms">
+    <article class="room">
+      <div class="room-head"><div class="room-title"><div class="room-icon">🏫</div><div><h3>Kelas A</h3><div class="room-sub">DHT22 A · PIR A · Relay A · Fan A</div></div></div><span class="status-tag" id="motion-tag-A">Menunggu data</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">Suhu</div><div class="metric-value"><span id="temp-A">--</span><span class="metric-unit"> °C</span></div><div class="metric-detail">GPIO16</div></div>
+        <div class="metric"><div class="metric-label">Kelembapan</div><div class="metric-value"><span id="hum-A">--</span><span class="metric-unit"> %</span></div><div class="metric-detail">DHT22 A</div></div>
+        <div class="metric"><div class="metric-label">Gerakan PIR</div><div class="metric-value" style="font-size:16px" id="motion-A">--</div><div class="metric-detail">GPIO32</div></div>
+        <div class="metric"><div class="metric-label">Status Kipas</div><div class="metric-value" style="font-size:16px" id="fan-A">--</div><div class="metric-detail" id="sensor-time-A">Menunggu sensor</div></div>
+      </div>
+      <div class="controls">
+        <div class="control-row"><div class="control-label"><b>Kendali kipas Kelas A</b><small id="fan-detail-A">Perintah dikirim melalui cloud</small></div><div class="buttons"><button class="btn on" id="on-A" onclick="setFan('A',true)">NYALAKAN</button><button class="btn off" id="off-A" onclick="setFan('A',false)">MATIKAN</button></div></div>
+        <div class="control-note" id="note-A">Menunggu data ESP32.</div>
+      </div>
+    </article>
+
+    <article class="room">
+      <div class="room-head"><div class="room-title"><div class="room-icon">🏫</div><div><h3>Kelas B</h3><div class="room-sub">DHT22 B · PIR B · Relay B · Fan B</div></div></div><span class="status-tag" id="motion-tag-B">Menunggu data</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">Suhu</div><div class="metric-value"><span id="temp-B">--</span><span class="metric-unit"> °C</span></div><div class="metric-detail">GPIO17</div></div>
+        <div class="metric"><div class="metric-label">Kelembapan</div><div class="metric-value"><span id="hum-B">--</span><span class="metric-unit"> %</span></div><div class="metric-detail">DHT22 B</div></div>
+        <div class="metric"><div class="metric-label">Gerakan PIR</div><div class="metric-value" style="font-size:16px" id="motion-B">--</div><div class="metric-detail">GPIO33</div></div>
+        <div class="metric"><div class="metric-label">Status Kipas</div><div class="metric-value" style="font-size:16px" id="fan-B">--</div><div class="metric-detail" id="sensor-time-B">Menunggu sensor</div></div>
+      </div>
+      <div class="controls">
+        <div class="control-row"><div class="control-label"><b>Kendali kipas Kelas B</b><small id="fan-detail-B">Perintah dikirim melalui cloud</small></div><div class="buttons"><button class="btn on" id="on-B" onclick="setFan('B',true)">NYALAKAN</button><button class="btn off" id="off-B" onclick="setFan('B',false)">MATIKAN</button></div></div>
+        <div class="control-note" id="note-B">Menunggu data ESP32.</div>
+      </div>
+    </article>
+  </section>
+
+  <div class="section-head"><h2>Riwayat Cloud</h2><span class="muted">Riwayat sensor dan perubahan status kipas dipisahkan menurut kelas</span></div>
+  <section class="lower-grid">
+    <div class="panel"><h3>Riwayat Sensor</h3><div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Kelas</th><th>Suhu</th><th>RH</th><th>Gerakan</th></tr></thead><tbody id="sensor-rows"><tr><td colspan="5" class="empty">Belum ada data.</td></tr></tbody></table></div></div>
+    <div class="panel"><h3>Riwayat Perubahan Kipas</h3><div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Kelas</th><th>Kipas</th><th>Sumber</th></tr></thead><tbody id="fan-rows"><tr><td colspan="4" class="empty">Belum ada perubahan.</td></tr></tbody></table></div></div>
+  </section>
+  <div class="footer">SMART CLASSROOM FAN · ESP32 + REST API + SUPABASE POSTGRESQL</div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+let refreshing = false;
+let deviceOnline = false;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+
+async function api(url, options={}) {
+  const headers = {'Content-Type':'application/json', ...(options.headers || {})};
+  if (options.method && options.method.toUpperCase() !== 'GET') headers['X-CSRF-Token'] = csrfToken;
+  const response = await fetch(url, {cache:'no-store', ...options, headers});
+  const data = await response.json().catch(() => ({ok:false,error:'Respons server tidak dapat dibaca'}));
+  if (response.status === 401) { window.location.href = '/login'; throw new Error('Sesi berakhir. Silakan login kembali.'); }
+  if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function renderRoom(cid, room) {
+  const value = v => v == null ? '--' : Number(v).toFixed(1);
+  $(`temp-${cid}`).textContent = value(room.temperature);
+  $(`hum-${cid}`).textContent = value(room.humidity);
+  $(`motion-${cid}`).textContent = room.motion ? 'TERDETEKSI' : 'TIDAK ADA';
+  $(`fan-${cid}`).textContent = room.fan_on ? 'MENYALA' : 'MATI';
+  $(`fan-${cid}`).style.color = room.fan_on ? 'var(--green)' : 'var(--muted)';
+  const motionTag = $(`motion-tag-${cid}`);
+  motionTag.textContent = room.motion ? 'Gerakan terdeteksi' : 'Tidak ada gerakan';
+  motionTag.className = 'status-tag' + (room.motion ? ' active' : '');
+  $(`sensor-time-${cid}`).textContent = room.sensor_updated_at || 'Belum ada data sensor';
+  $(`fan-detail-${cid}`).textContent = room.command_pending
+    ? `Perintah ${room.desired_fan_on ? 'ON' : 'OFF'} menunggu ESP32`
+    : `Status cloud: ${room.desired_fan_on ? 'ON' : 'OFF'}`;
+  $(`note-${cid}`).textContent = !deviceOnline
+    ? 'ESP32 offline. Perintah dari dashboard tetap disimpan di cloud dan akan dikirim saat perangkat tersambung kembali. Tombol fisik tetap dapat digunakan secara lokal.'
+    : room.command_pending
+      ? 'Perintah sedang dikirim ke ESP32. Status kipas akan diperbarui setelah perangkat mengonfirmasi perubahan.'
+      : 'Monitoring aktif. Sensor hanya mengirim informasi; kipas dikendalikan melalui dashboard atau tombol fisik.';
+  $(`note-${cid}`).className = 'control-note' + (room.command_pending ? ' pending' : '');
+  $(`on-${cid}`).disabled = room.desired_fan_on && !room.command_pending;
+  $(`off-${cid}`).disabled = !room.desired_fan_on && !room.command_pending;
+}
+
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    const data = await api('/api/status');
+    deviceOnline = data.online;
+    $('connection').textContent = deviceOnline ? '● ESP32 ONLINE' : '● ESP32 OFFLINE';
+    $('connection').className = 'pill' + (deviceOnline ? ' online' : '');
+    for (const cid of ['A','B']) if (data.classes?.[cid]) renderRoom(cid, data.classes[cid]);
+  } catch (error) {
+    deviceOnline = false;
+    $('connection').textContent = '● BACKEND ERROR';
+    $('connection').className = 'pill';
+    for (const cid of ['A','B']) {
+      $(`note-${cid}`).textContent = error.message;
+      $(`on-${cid}`).disabled = $(`off-${cid}`).disabled = true;
+    }
+  } finally { refreshing = false; }
+}
+
+async function setFan(cid, fanOn) {
+  $(`on-${cid}`).disabled = $(`off-${cid}`).disabled = true;
+  try {
+    const result = await api('/api/control', {method:'POST', body:JSON.stringify({class_id:cid, fan_on:fanOn})});
+    $(`fan-detail-${cid}`).textContent = `Perintah #${result.command_id} tersimpan di cloud`;
+    await refresh();
+  } catch (error) { alert(error.message); await refresh(); }
+}
+
+async function loadSensorHistory() {
+  try {
+    const data = await api('/api/history?limit=30');
+    $('sensor-rows').innerHTML = data.items.length ? data.items.map(item =>
+      `<tr><td>${esc(item.created_at)}</td><td>Kelas ${esc(item.class_id)}</td><td>${item.temperature == null ? '--' : Number(item.temperature).toFixed(1)+' °C'}</td><td>${item.humidity == null ? '--' : Number(item.humidity).toFixed(1)+' %'}</td><td>${item.motion ? 'Terdeteksi' : 'Tidak'}</td></tr>`
+    ).join('') : '<tr><td colspan="5" class="empty">Belum ada data.</td></tr>';
+  } catch (error) { $('sensor-rows').innerHTML = `<tr><td colspan="5" class="empty error">${esc(error.message)}</td></tr>`; }
+}
+
+async function loadFanHistory() {
+  try {
+    const data = await api('/api/fan-history?limit=40');
+    $('fan-rows').innerHTML = data.items.length ? data.items.map(item =>
+      `<tr><td>${esc(item.created_at)}</td><td>Kelas ${esc(item.class_id)}</td><td>${item.fan_on ? 'Menyala' : 'Mati'}</td><td>${esc(item.source)}</td></tr>`
+    ).join('') : '<tr><td colspan="4" class="empty">Belum ada perubahan.</td></tr>';
+  } catch (error) { $('fan-rows').innerHTML = `<tr><td colspan="4" class="empty error">${esc(error.message)}</td></tr>`; }
+}
+
+refresh(); loadSensorHistory(); loadFanHistory();
+setInterval(refresh, 3000);
+setInterval(loadSensorHistory, 15000);
+setInterval(loadFanHistory, 15000);
+</script>
+</body>
+</html>
