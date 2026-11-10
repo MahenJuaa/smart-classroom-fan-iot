@@ -47,7 +47,7 @@ DHT dhtB(DHT_B_PIN, DHT_TYPE);
 
 // ---------------- SERVER CONFIGURATION ----------------
 const char* SERVER_BASE_URL = "https://smart-classroom-fan-iot.vercel.app";
-const char* DEVICE_TOKEN = "CgK7esap9uXRm8zMDSC8yLAZMIAN6B2nsUF0ZDnc4qXBumTG7vueIMHYlgGv1gh5";
+const char* DEVICE_TOKEN = "GANTI_DENGAN_DEVICE_TOKEN_RANDOM_MINIMAL_32_KARAKTER";
 const bool INSECURE_TLS_FOR_TESTING = true; // prototype only
 const char* ROOT_CA_CERT = R"EOF(
 PASTE_ROOT_CA_CERTIFICATE_HERE
