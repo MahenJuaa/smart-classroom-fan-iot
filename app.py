@@ -342,7 +342,7 @@ def device_commands():
             with conn.cursor() as cur:
                 cur.execute("UPDATE device_state SET last_seen=NOW() WHERE id=1")
                 cur.execute(
-                    """SELECT c.class_id, c.desired_fan_on, c.control_mode,
+                    """SELECT c.class_id, c.desired_fan_on, c.control_mode, c.control_version,
                               COALESCE((SELECT MAX(f.id) FROM fan_commands f
                                         WHERE f.class_id=c.class_id AND f.status='pending'), 0) AS command_id
                        FROM classroom_state c ORDER BY c.class_id"""
@@ -350,7 +350,8 @@ def device_commands():
                 rows = cur.fetchall()
         classes = {row["class_id"]: {"command_id": int(row["command_id"]),
                                      "fan_on": bool(row["desired_fan_on"]),
-                                     "control_mode": row["control_mode"]} for row in rows}
+                                     "control_mode": row["control_mode"],
+                                     "control_version": int(row["control_version"])} for row in rows}
         if set(classes) != VALID_CLASSES:
             return jsonify({"ok": False, "error": "Kelas A dan B belum diinisialisasi."}), 503
         return jsonify({"ok": True, "classes": classes})
@@ -386,7 +387,8 @@ def acknowledge_command():
                 previous = cur.fetchone()
                 cur.execute(
                     """UPDATE classroom_state
-                       SET fan_on=%s, desired_fan_on=%s, control_mode=%s, updated_at=NOW()
+                       SET fan_on=%s, desired_fan_on=%s, control_mode=%s,
+                           control_version=control_version + 1, updated_at=NOW()
                        WHERE class_id=%s""", (fan_on, fan_on, control_mode, cid)
                 )
                 if previous and bool(previous["fan_on"]) != fan_on:
@@ -417,7 +419,8 @@ def physical_control_sync():
                 cur.execute("UPDATE fan_commands SET status='superseded' WHERE class_id=%s AND status='pending'", (cid,))
                 cur.execute(
                     """UPDATE classroom_state
-                       SET fan_on=%s, desired_fan_on=%s, control_mode='MANUAL', updated_at=NOW()
+                       SET fan_on=%s, desired_fan_on=%s, control_mode='MANUAL',
+                           control_version=control_version + 1, updated_at=NOW()
                        WHERE class_id=%s""", (fan_on, fan_on, cid)
                 )
                 if bool(previous["fan_on"]) != fan_on:
@@ -458,7 +461,8 @@ def control_fan():
                 cur.execute("UPDATE fan_commands SET status='superseded' WHERE class_id=%s AND status='pending'", (cid,))
                 cur.execute(
                     """UPDATE classroom_state
-                       SET control_mode=%s, desired_fan_on=%s, updated_at=NOW()
+                       SET control_mode=%s, desired_fan_on=%s,
+                           control_version=control_version + 1, updated_at=NOW()
                        WHERE class_id=%s""", (control_mode, fan_on, cid)
                 )
                 cur.execute(
