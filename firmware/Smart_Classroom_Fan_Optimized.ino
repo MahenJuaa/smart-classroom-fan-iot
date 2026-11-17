@@ -121,7 +121,6 @@ RoomSnapshot snapshotRoom(RoomState& room) {
 }
 
 uint32_t lastDhtReadMs = 0;
-uint32_t lastWiFiRetryMs = 0;
 uint32_t bothButtonsHeldSinceMs = 0;
 bool wifiPortalTriggered = false;
 String activePortalName;
@@ -536,11 +535,6 @@ void loop() {
   applyAutomaticControl(roomA, now);
   applyAutomaticControl(roomB, now);
   handleNetworkEvents();
-
-  if (WiFi.status() != WL_CONNECTED && (uint32_t)(now - lastWiFiRetryMs) >= WIFI_RETRY_INTERVAL_MS) {
-    lastWiFiRetryMs = now;
-    WiFi.reconnect();
-  }
 
   // No delay(): loop remains responsive to PIR and physical buttons.
   yield();
