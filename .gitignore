@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 *.py[cod]
+
+# Private ESP32 firmware credentials
+firmware/secrets.h
