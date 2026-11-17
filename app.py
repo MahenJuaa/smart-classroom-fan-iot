@@ -533,5 +533,5 @@ def fan_history():
 
 
 if __name__ == "__main__":
-    # Local development only. Public deployment should use Gunicorn behind HTTPS.
+    # Local development only. Vercel imports the module-level Flask app instance.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
