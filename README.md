@@ -1,268 +1,192 @@
-# Smart Classroom Fan v3 — Cloud IoT + Supabase
+# Smart Classroom Fan — Vercel + Supabase + ESP32
 
-Versi ini mengubah proyek menjadi **sistem monitoring dan kontrol IoT berbasis cloud**, bukan sistem kontrol otomatis/cerdas.
+Firmware and dashboard for two classrooms controlled by one ESP32.
 
-## 1. Perilaku sistem yang dituju
+## 1. Operating logic
 
-- DHT22 mengukur suhu dan kelembapan Kelas A dan B.
-- PIR mendeteksi gerakan pada masing-masing kelas. Nilainya hanya ditampilkan dan disimpan sebagai data monitoring.
-- ESP32 mengirim data sensor ke backend melalui internet.
-- Backend menyimpan status terakhir dan riwayat ke **Supabase PostgreSQL**.
-- Dashboard web dapat dibuka dari luar jaringan lokal setelah backend di-deploy ke hosting publik dengan HTTPS.
-- Petugas menyalakan/mematikan kipas Kelas A dan B secara terpisah melalui dashboard.
-- Tombol fisik di tiap kelas juga berfungsi untuk toggle kipas kelas tersebut.
-- Tidak ada ambang suhu, timer occupancy, mode AUTO, atau aturan otomatis PIR/DHT22 yang mengubah status kipas.
+Each class has an independent control mode.
 
-**Catatan status kipas:** data `fan_on` menunjukkan status perintah GPIO/relay yang dilaporkan ESP32. Karena prototipe tidak memakai sensor arus atau sensor RPM, dashboard tidak bisa membuktikan bahwa motor kipas benar-benar berputar.
+### AUTO
+- Temperature at or above 30°C AND PIR motion detected: fan ON.
+- Temperature below 30°C: fan OFF.
+- Temperature at or above 30°C but no motion: fan remains ON only until 5 minutes have elapsed since the last detected motion, then turns OFF.
+- The 5-minute timer runs locally on the ESP32 and does not depend on Vercel or the internet.
+- If the DHT11 reading is invalid, the firmware uses a fail-safe and does not start the fan automatically.
 
-## 2. Arsitektur cloud
+### MANUAL
+- A physical button immediately toggles that room's relay and changes that room to MANUAL.
+- Dashboard ON/OFF commands change that room to MANUAL.
+- The dashboard AUTO button returns only that room to automatic control.
+- Kelas A and Kelas B remain independent.
 
-```text
-KELAS A: DHT22 A + PIR A + Button A + Relay A + Fan A
-KELAS B: DHT22 B + PIR B + Button B + Relay B + Fan B
-                         |
-                         v
-                  ESP32 DevKit V1
-               baca sensor + relay manual
-                         |
-                   Wi-Fi / Internet
-                         |
-                         v
-              Backend Flask REST API
-              (hosting publik + HTTPS)
-                 /               \
-                v                 v
-       Supabase PostgreSQL    Dashboard Web
-       status + history       monitoring + control
-```
+The relay state shown on the dashboard is the state reported by the ESP32 GPIO logic. There is no RPM or current sensor, so the dashboard cannot prove that the fan motor is physically rotating.
 
-ESP32 **tidak** menyimpan Supabase database password atau Supabase secret key. ESP32 hanya mengenal URL backend dan `DEVICE_TOKEN`. Backend yang memegang koneksi database cloud. Dashboard juga berbicara ke backend, bukan langsung ke kredensial database.
+## 2. Architecture
 
-## 3. Struktur folder
+~~~text
+DHT11 + PIR + Button + Relay + Fan (Kelas A) ─┐
+                                               ├─ ESP32 DevKit
+DHT11 + PIR + Button + Relay + Fan (Kelas B) ─┘
+                 │
+           local control loop
+       AUTO / MANUAL / 5-minute timer
+                 │
+            Wi-Fi / HTTPS
+                 │
+        Vercel Flask Function
+          dashboard + REST API
+                 │
+       Supabase PostgreSQL
+       status / command queue / history
+~~~
 
-```text
-Smart-Classroom-Fan-v3-Supabase/
-├── app.py
-├── schema.sql
-├── requirements.txt
-├── Procfile
-├── .env.example
-├── README.md
-├── API.md
-├── AUDIT.md
-├── firmware/
-│   └── smart_classroom_fan.ino
-└── templates/
-    ├── index.html
-    └── login.html
-```
+Sensor reading, relay control, physical buttons, and the 5-minute timer run locally. Vercel is for the dashboard, cloud state, remote commands, and history. A Vercel/database timeout must not stop local fan control.
 
-## 4. Database Supabase
+## 3. Repository layout
 
-1. Buat project baru di Supabase.
-2. Buka **SQL Editor** pada project tersebut.
-3. Jalankan seluruh isi `schema.sql` satu kali.
-4. Pastikan tabel berikut tersedia:
-   - `device_state`: heartbeat/last-seen ESP32.
-   - `classroom_state`: status terkini dua kelas, termasuk desired dan actual fan state.
-   - `sensor_logs`: riwayat suhu, kelembapan, dan PIR.
-   - `fan_commands`: antrean perintah ON/OFF yang dibuat dashboard.
-   - `fan_logs`: riwayat perubahan kipas dan sumber perintah.
-5. Pada **Connect** di Supabase, salin connection string PostgreSQL. Untuk hosting backend yang hanya mendukung IPv4, gunakan **Session pooler**. Ganti placeholder password dengan password database project.
+~~~text
+app.py
+templates/
+  index.html
+  login.html
+firmware/
+  Smart_Classroom_Fan_Optimized.ino
+schema.sql
+API.md
+requirements.txt
+.env.example
+.python-version
+vercel.json
+AUDIT.md
+~~~
 
-Schema mengaktifkan RLS dan mencabut grant tabel dari role `anon` dan `authenticated`. Akses tabel dilakukan melalui koneksi backend yang disimpan sebagai environment variable pada hosting. Jangan pernah menyalin database password atau Supabase secret key ke HTML, JavaScript browser, firmware, GitHub, maupun ZIP yang dibagikan.
+## 4. Deploy the Flask application to Vercel
 
-## 5. Menjalankan backend secara lokal
+Vercel detects the Flask application from the top-level Flask app instance in app.py; no Gunicorn start command or custom build command is required. Procfile is not used by Vercel.
 
-Python 3.10+ direkomendasikan.
+1. In Vercel, import this GitHub repository.
+2. Select the repository root as the Root Directory.
+3. Use the Python runtime detected from requirements.txt and .python-version. Do not enter a Gunicorn Start Command.
+4. Add the environment variables below to the Vercel project. Add them to Production and Preview only where those deployments should have real access to the database and device.
+5. Deploy. After deployment, open https://YOUR-VERCEL-DOMAIN/api/health. A healthy response should include "ok": true, "connected": true, and "initialized": true.
+6. Open the root URL and sign in to the dashboard.
 
-### Windows PowerShell
+Vercel deploys this Flask app as a Python Function. vercel.json sets a 30-second maximum function duration.
 
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-```
+Official reference: https://vercel.com/docs/frameworks/backend/flask
 
-Isi `.env` dengan nilai milik project:
+## 5. Vercel environment variables
 
-```dotenv
-DATABASE_URL=postgresql://USER:PASSWORD@POOLER_HOST:5432/postgres
-SECRET_KEY=isi_dengan_random_secret_minimal_32_karakter
-DEVICE_TOKEN=isi_dengan_token_acak_tersendiri_minimal_32_karakter
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=password_admin_yang_kuat
-COOKIE_SECURE=false
-DEVICE_ONLINE_SECONDS=20
-PORT=5000
-```
+Set these in Vercel Project → Settings → Environment Variables. Do not commit actual credentials in this repository.
 
-`COOKIE_SECURE=false` hanya untuk uji lokal menggunakan `http://localhost`. Saat di-host publik dengan HTTPS, ubah menjadi `true`.
+| Variable | Description |
+|---|---|
+| DATABASE_URL | Supabase PostgreSQL Transaction Pooler connection URI, normally port 6543 |
+| SECRET_KEY | Random Flask session secret, at least 32 characters |
+| DEVICE_TOKEN | Separate random device token, at least 32 characters |
+| ADMIN_USERNAME | Dashboard login username |
+| ADMIN_PASSWORD | Strong, unique dashboard password |
+| COOKIE_SECURE | true for Vercel HTTPS |
+| DEVICE_ONLINE_SECONDS | 30 recommended for this heartbeat interval |
 
-Generate secret acak melalui:
+For Vercel/serverless functions, use the Supabase Transaction Pooler URI from Supabase Dashboard → Connect, not a direct database connection. The host is the Supabase pooler host and the port is normally 6543. Replace the password placeholder with the actual database password. Do not paste the URI into chat, firmware, or a public commit.
 
-```powershell
+The backend uses a one-connection application-side pool per warm function instance, short connection/pool wait timeouts, SSL required, and disables prepared statements for compatibility with the shared transaction pooler.
+
+Generate separate secrets locally (PowerShell):
+
+~~~powershell
 py -c "import secrets; print(secrets.token_urlsafe(48))"
-```
+~~~
 
-Gunakan nilai acak yang berbeda untuk `SECRET_KEY` dan `DEVICE_TOKEN`.
+Run it twice: one value for SECRET_KEY, another for DEVICE_TOKEN. The device token in the ESP32 firmware must match Vercel's DEVICE_TOKEN exactly.
 
-Jalankan:
+## 6. Supabase database setup / migration
 
-```powershell
-python app.py
-```
+1. Open Supabase Dashboard → SQL Editor.
+2. Run the current schema.sql from this branch.
+3. The script is designed to be re-runnable. On an existing v3 database it adds classroom_state.control_mode, classroom_state.control_version, and fan_commands.control_mode without dropping existing history.
+4. New classrooms default to AUTO. Existing rows receive AUTO when the new column is first added. Existing pending dashboard commands receive MANUAL as the default mode.
+5. Confirm both classes exist and these tables are present: device_state, classroom_state, sensor_logs, fan_commands, and fan_logs.
 
-Buka `http://127.0.0.1:5000`, kemudian login dengan `ADMIN_USERNAME` dan `ADMIN_PASSWORD`. Health check: `http://127.0.0.1:5000/api/health`.
+The database is accessed only by the backend. Do not place database passwords or Supabase service-role credentials in browser JavaScript or ESP32 firmware. RLS is enabled and public/anon/authenticated table grants are revoked by the schema.
 
-## 6. Deploy backend agar dapat diakses publik
+## 7. Firmware setup
 
-Contoh target hosting: **Render Web Service**. Hosting lain yang mendukung aplikasi Python persistent web service juga dapat dipakai.
+Open firmware/Smart_Classroom_Fan_Optimized.ino in Arduino IDE. Install:
+- WiFiManager
+- DHT sensor library by Adafruit
+- Adafruit Unified Sensor
+- ArduinoJson 6.x or 7.x
 
-1. Push folder project ke repository GitHub privat.
-2. Buat Web Service dari repository tersebut.
-3. Runtime: Python.
-4. Build command:
+Set:
+- SERVER_BASE_URL to the Vercel origin, e.g. https://YOUR-VERCEL-DOMAIN.
+- DEVICE_TOKEN to the exact token set in Vercel.
+- Keep Wi-Fi setup through WiFiManager.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+The provided prototype firmware currently has INSECURE_TLS_FOR_TESTING=true. This skips HTTPS certificate validation and is suitable only for temporary testing on a trusted network. Before production use, set it to false and provide the correct trusted root CA in ROOT_CA_CERT.
 
-5. Start command:
+The ESP32 network task uses a 15-second HTTP timeout. This does not block the sensor/button/relay control loop because cloud requests run on a separate FreeRTOS task. Command polling is every 5 seconds and telemetry is sent every 15 seconds.
 
-   ```bash
-   gunicorn --bind 0.0.0.0:$PORT app:app
-   ```
+## 8. GPIO map in the current firmware
 
-6. Tambahkan environment variables berikut pada dashboard hosting:
-   - `DATABASE_URL`: Session pooler connection string Supabase.
-   - `SECRET_KEY`: random secret minimal 32 karakter.
-   - `DEVICE_TOKEN`: random token berbeda minimal 32 karakter.
-   - `ADMIN_USERNAME`: username dashboard.
-   - `ADMIN_PASSWORD`: password dashboard yang kuat.
-   - `COOKIE_SECURE`: `true`.
-   - `DEVICE_ONLINE_SECONDS`: `20`.
-7. Deploy dan tunggu status service aktif.
-8. Uji `https://ALAMAT-HOSTING/api/health`. Harus mengembalikan `ok: true`, `connected: true`, dan `initialized: true`.
-9. Buka alamat HTTPS root untuk login dashboard.
+Follow the firmware currently in this branch, not older pin tables or old dashboard screenshots.
 
-Jangan menaruh `.env` di repository. File `.gitignore` sudah mengecualikannya. Jangan memublikasikan repository yang berisi password, token, atau kredensial database.
-
-## 7. Konfigurasi firmware ESP32
-
-Buka `firmware/smart_classroom_fan.ino` di Arduino IDE. Pasang library:
-
-- DHT sensor library by Adafruit.
-- Adafruit Unified Sensor.
-- ArduinoJson 6.x atau 7.x.
-
-Edit konfigurasi berikut:
-
-```cpp
-const char* WIFI_SSID = "NAMA_WIFI_2_4GHZ";
-const char* WIFI_PASSWORD = "PASSWORD_WIFI";
-const char* SERVER_BASE_URL = "https://ALAMAT-HOSTING";
-const char* DEVICE_TOKEN = "TOKEN_YANG_SAMA_DENGAN_ENV";
-```
-
-`DEVICE_TOKEN` harus sama persis dengan environment variable di hosting.
-
-### TLS/HTTPS
-
-Firmware menyediakan opsi `INSECURE_TLS_FOR_TESTING`. Nilai default `true` mematikan verifikasi sertifikat HTTPS dan hanya layak untuk pengujian prototipe sementara di jaringan tepercaya. Sebelum penggunaan publik, ubah ke `false` dan isi `ROOT_CA_CERT` dengan root CA tepercaya yang memvalidasi sertifikat domain hosting. Jangan menganggap HTTPS aman hanya karena URL diawali `https://` bila verifikasi sertifikat dimatikan.
-
-### Interval komunikasi default
-
-- DHT22 dibaca setiap 3 detik.
-- Telemetry ke cloud dikirim setiap 10 detik.
-- ESP32 memeriksa perintah dashboard setiap 2 detik.
-- Dashboard memperbarui status setiap 3 detik.
-
-Interval telemetry dapat diperbesar menjadi 15–30 detik untuk mengurangi pertumbuhan tabel `sensor_logs`.
-
-## 8. Cara kerja kontrol
-
-### Dashboard ke kipas
-
-1. Petugas menekan NYALAKAN atau MATIKAN pada panel kelas yang diinginkan.
-2. Backend membuat baris pada `fan_commands` dan memperbarui `desired_fan_on` di Supabase.
-3. ESP32 mengambil antrean perintah setiap 2 detik.
-4. ESP32 mengatur GPIO relay pada kelas tersebut.
-5. ESP32 mengirim acknowledgment (`/api/device/ack`).
-6. Backend memperbarui `fan_on`, status perintah, dan `fan_logs`.
-
-Jika ESP32 sedang offline, perintah dashboard tetap tersimpan sebagai antrean. Saat ESP32 tersambung kembali, perangkat mengambil perintah yang masih pending.
-
-### Tombol fisik
-
-- Button A mengubah relay/fan A secara langsung.
-- Button B mengubah relay/fan B secara langsung.
-- Setiap toggle dikirim ke backend ketika jaringan tersedia.
-- Ketika internet terputus, tombol fisik tetap mengontrol relay secara lokal. Perubahan lokal disinkronkan saat koneksi kembali.
-
-### Sensor
-
-- DHT22 hanya mengirim suhu dan kelembapan.
-- PIR hanya mengirim status gerakan HIGH/LOW.
-- Nilai sensor tidak memicu relay.
-
-## 9. Peta GPIO final
-
-| Komponen | Kelas A | Kelas B |
+| Component | Kelas A | Kelas B |
 |---|---:|---:|
-| DHT22 DATA | GPIO16 | GPIO17 |
-| PIR OUT | GPIO32 | GPIO33 |
-| Relay IN | GPIO25 | GPIO26 |
-| Push Button | GPIO27 | GPIO18 |
+| DHT11 DATA | GPIO16 | GPIO17 |
+| PIR OUT | GPIO26 | GPIO25 |
+| Relay IN | GPIO32 | GPIO33 |
+| Push button | GPIO27 | GPIO14 |
 
-Jangan mengubah peta pin tanpa memperbarui firmware dan diagram wiring.
+Button wiring uses INPUT_PULLUP: one terminal to the GPIO and the other to ESP32 GND. GPIO14 is used for Button B in this firmware.
 
-## 10. Pemeriksaan perangkat keras
+## 9. API behavior
 
-Gunakan hasil pengecekan hardware sebelumnya sebagai acuan, dengan pemeriksaan wajib berikut:
+| Endpoint | Purpose |
+|---|---|
+| GET /api/health | Backend and database health |
+| GET /api/status | Dashboard status, actual fan state, desired state, mode, and device online state |
+| POST /api/device/telemetry | ESP32 sensor + actual relay state |
+| GET /api/device/commands | ESP32 fetches mode/version and pending dashboard commands |
+| POST /api/device/ack | ESP32 acknowledges a dashboard command |
+| POST /api/device/local-control | Physical button state is synced as MANUAL |
+| POST /api/control | Dashboard queues MANUAL ON/OFF or AUTO mode |
+| GET /api/history | Sensor history |
+| GET /api/fan-history | Fan state history |
 
-1. DHT22 VCC 3.3V, DATA ke GPIO, GND ke GND ESP32.
-2. PIR HC-SR501 VCC 5V, GND bersama GND kontrol, OUT tidak boleh melebihi batas GPIO ESP32 3.3V.
-3. Relay module VCC sesuai spesifikasi modul (umumnya 5V), GND sisi kontrol ke GND ESP32, IN ke GPIO relay.
-4. Pastikan input relay kompatibel dengan logika GPIO ESP32 3.3V serta pastikan active-LOW/active-HIGH sesuai modul aktual.
-5. Pastikan rating kontak relay sesuai beban motor DC 24V dan arus startup motor.
-6. Adaptor yang sebelumnya diperiksa bertanda 24V DC maksimum 1.5A/36W. Pastikan arus total dan startup kedua kipas tidak melampaui kemampuan adaptor dengan margin aman.
-7. Jalur beban 24V tidak boleh masuk ke ESP32, expansion board, atau breadboard.
-8. Adaptor +24V ke COM relay A dan B; NO A ke positif kipas A; NO B ke positif kipas B; negatif kipas kembali ke negatif adaptor. NC tidak digunakan.
-9. Negatif adaptor 24V tidak perlu disatukan dengan GND ESP32 karena sisi beban dipisahkan oleh kontak relay.
-10. Jangan menyambung/melepas kabel ketika adaptor terhubung ke listrik.
+Device routes require X-Device-Token. Dashboard routes require an authenticated Flask session, and dashboard POSTs require the CSRF header.
 
-Uji firmware, sensor, tombol, dan relay tanpa memasang beban kipas terlebih dahulu. Pastikan relay tidak aktif saat boot sebelum memasang 24V.
+### Mode synchronization
 
-## 11. Endpoint API
+Each classroom stores control_mode and a monotonically increasing control_version. Whenever the dashboard or physical button changes control mode, the version increases. The ESP32 processes a new version even when there is no pending fan command, which lets the device restore the cloud mode after a restart. A command acknowledgement does not increment the version.
 
-Detail payload ada di `API.md`.
+Telemetry updates sensor values and actual relay state. In AUTO it also mirrors actual fan state into the desired state; in MANUAL it does not overwrite the requested state.
 
-- `GET /api/health`: cek koneksi Supabase.
-- `GET /api/status`: status dua kelas (login dashboard).
-- `POST /api/device/telemetry`: ESP32 mengirim data sensor dan status relay.
-- `GET /api/device/commands`: ESP32 mengambil perintah dashboard.
-- `POST /api/device/ack`: ESP32 mengonfirmasi perintah.
-- `POST /api/device/local-control`: sinkronisasi tombol fisik.
-- `POST /api/control`: dashboard mengirim perintah ON/OFF (login + CSRF).
-- `GET /api/history`: riwayat sensor (login dashboard).
-- `GET /api/fan-history`: riwayat kipas (login dashboard).
+## 10. Test checklist
 
-## 12. Checklist uji sistem
+1. Deploy the Vercel branch and verify /api/health.
+2. Open dashboard login and confirm status refreshes.
+3. Upload firmware after setting the Vercel URL and device token.
+4. Confirm Serial Monitor displays Wi-Fi connected and successful HTTP 2xx responses.
+5. Confirm Kelas A sensor readings map to A and Kelas B readings map to B.
+6. In AUTO, test temperature below 30°C, then at/above 30°C with PIR motion.
+7. With temperature ≥30°C, stop moving and confirm the fan turns OFF 5 minutes after the last PIR detection.
+8. Press Button A and confirm only A changes and enters MANUAL; repeat for B.
+9. Use dashboard AUTO for one room and confirm the local sensor logic resumes for that room only.
+10. Use dashboard ON/OFF and confirm only the selected room enters MANUAL.
+11. Disconnect internet. Confirm local AUTO and physical buttons continue working; reconnect and confirm telemetry/mode sync recovers.
+12. Test one 24V fan first, then both, only after verifying relay DC contact rating and the fan/adaptor current margin.
 
-1. Supabase: jalankan `schema.sql`; pastikan 5 tabel tersedia dan dua kelas sudah terinisialisasi.
-2. Backend: jalankan lokal, login dashboard, cek `/api/health`.
-3. Hosting: deploy backend; health check HTTPS mengembalikan `initialized: true`.
-4. Firmware: compile dan upload; pastikan ESP32 berhasil tersambung ke Wi-Fi dan API.
-5. Sensor: pastikan data A hanya masuk ke Kelas A dan B hanya ke Kelas B.
-6. PIR: gerakkan tangan di depan PIR A/B; status pada dashboard berubah tanpa memengaruhi relay.
-7. Dashboard: ON Kelas A; relay A berubah, relay B tetap. Ulangi untuk OFF dan Kelas B.
-8. Tombol fisik: tombol A hanya mengubah relay A; tombol B hanya mengubah relay B.
-9. Cloud: pastikan `sensor_logs` dan `fan_logs` bertambah di Supabase.
-10. Offline: putuskan internet; tombol lokal tetap bekerja. Perintah dashboard yang dibuat saat offline akan menunggu hingga perangkat kembali online.
-11. Beban kipas: setelah rating relay, polaritas adaptor, dan arus startup dipastikan, uji satu kipas terlebih dahulu baru kedua kipas.
+## 11. Electrical safety and prototype limits
 
-## 13. Batasan dan validasi
+- Do not connect 24V to ESP32 GPIO, 3V3, VIN, or a breadboard rail.
+- Keep the 24V load circuit isolated by the relay contacts. The relay control side uses its specified low-voltage supply.
+- Verify the actual relay board's active level and DC motor contact rating before connecting fans.
+- The 24V adaptor previously identified is labelled 24V DC, 1.5A (36W). Check the fans' actual rated current and startup current; do not assume the nominal estimate is the measured value.
+- The firmware reports relay command state only; there is no fan RPM or current feedback.
+- Never wire or modify the 24V circuit while the adaptor is powered.
 
-Paket ini adalah implementasi sumber yang disusun untuk arsitektur cloud. Sebelum bisa diklaim berjalan penuh, masih harus dilakukan compile di Arduino IDE, pengisian kredensial Supabase/hosting milik pengguna, eksekusi schema pada project Supabase, deployment, serta pengujian ESP32 dan beban kipas nyata. Paket tidak menyertakan kredensial cloud milik pengguna.
+## 12. Validation status
+
+Static source updates are prepared in this branch. The following still require a real deployment/hardware test: Vercel environment variables, Supabase transaction-pooler URI, execution of the updated SQL, successful /api/health, ESP32 compile with the installed Arduino libraries, TLS certificate validation, and relay/fan behavior. Do not consider the system fully verified until these pass.
