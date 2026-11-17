@@ -86,7 +86,8 @@ struct RoomState {
   long lastCommandId = 0;
   uint32_t lastControlVersion = 0;
   bool initializedFromCloud = false;
-  volatile bool localControlDirty = false;
+  bool localControlDirty = false;
+  uint32_t localControlRevision = 0;
 
   RoomState(const char* roomId, DHT* sensor, uint8_t pir, uint8_t relay, uint8_t button)
     : id(roomId), dht(sensor), pirPin(pir), relayPin(relay), buttonPin(button) {}
@@ -94,6 +95,30 @@ struct RoomState {
 
 RoomState roomA("A", &dhtA, PIR_A_PIN, RELAY_A_PIN, BUTTON_A_PIN);
 RoomState roomB("B", &dhtB, PIR_B_PIN, RELAY_B_PIN, BUTTON_B_PIN);
+SemaphoreHandle_t stateMutex = nullptr;
+
+struct RoomSnapshot {
+  float temperature;
+  float humidity;
+  bool dhtValid;
+  bool motion;
+  bool fanOn;
+  bool localControlDirty;
+  uint32_t localControlRevision;
+  bool initializedFromCloud;
+  uint32_t lastControlVersion;
+};
+
+RoomSnapshot snapshotRoom(RoomState& room) {
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  RoomSnapshot snapshot{
+    room.temperature, room.humidity, room.dhtValid, room.motion, room.fanOn,
+    room.localControlDirty, room.localControlRevision,
+    room.initializedFromCloud, room.lastControlVersion
+  };
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  return snapshot;
+}
 
 uint32_t lastDhtReadMs = 0;
 uint32_t lastWiFiRetryMs = 0;
@@ -123,10 +148,17 @@ void applyRelay(RoomState& room) {
 }
 
 void setFan(RoomState& room, bool on, const char* reason) {
-  if (room.fanOn == on) return;
-  room.fanOn = on;
-  applyRelay(room);
-  Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+  bool changed = false;
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (room.fanOn != on) {
+    room.fanOn = on;
+    digitalWrite(room.relayPin, on ? relayOnLevel() : relayOffLevel());
+    changed = true;
+  }
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (changed) {
+    Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+  }
 }
 
 void applyAutomaticControl(RoomState& room, uint32_t now) {
@@ -135,16 +167,17 @@ void applyAutomaticControl(RoomState& room, uint32_t now) {
     return;
   }
 
+  const RoomSnapshot state = snapshotRoom(room);
   // Fail-safe: without a valid temperature reading, do not start automatically.
-  if (!room.dhtValid || room.temperature < TEMP_THRESHOLD_C) {
-    setFan(room, false, !room.dhtValid ? "sensor suhu tidak valid" : "suhu di bawah ambang");
+  if (!state.dhtValid || state.temperature < TEMP_THRESHOLD_C) {
+    setFan(room, false, !state.dhtValid ? "sensor suhu tidak valid" : "suhu di bawah ambang");
     return;
   }
 
-  if (room.motion) {
+  if (state.motion) {
     room.lastMotionMs = now;
     setFan(room, true, "suhu >= 30 C dan gerakan terdeteksi");
-  } else if (room.fanOn && (uint32_t)(now - room.lastMotionMs) >= NO_MOTION_TIMEOUT_MS) {
+  } else if (state.fanOn && (uint32_t)(now - room.lastMotionMs) >= NO_MOTION_TIMEOUT_MS) {
     setFan(room, false, "tidak ada gerakan selama 5 menit");
   }
 }
@@ -153,12 +186,16 @@ void readRoomTemperature(RoomState& room) {
   float t = room.dht->readTemperature();
   float h = room.dht->readHumidity();
   if (isnan(t) || isnan(h) || h < 0.0f || h > 100.0f || t < -20.0f || t > 80.0f) {
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
     room.dhtValid = false;
+    if (stateMutex) xSemaphoreGive(stateMutex);
     Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
   } else {
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
     room.temperature = t;
     room.humidity = h;
     room.dhtValid = true;
+    if (stateMutex) xSemaphoreGive(stateMutex);
   }
 }
 
@@ -184,16 +221,17 @@ bool postTelemetry() {
   JsonObject classes = payload.createNestedObject("classes");
   RoomState* rooms[] = {&roomA, &roomB};
   for (RoomState* room : rooms) {
+    const RoomSnapshot state = snapshotRoom(*room);
     JsonObject item = classes.createNestedObject(room->id);
-    if (room->dhtValid) {
-      item["temperature"] = room->temperature;
-      item["humidity"] = room->humidity;
+    if (state.dhtValid) {
+      item["temperature"] = state.temperature;
+      item["humidity"] = state.humidity;
     } else {
       item["temperature"] = nullptr;
       item["humidity"] = nullptr;
     }
-    item["motion"] = room->motion;
-    item["fan_on"] = room->fanOn;
+    item["motion"] = state.motion;
+    item["fan_on"] = state.fanOn;
   }
 
   String body;
@@ -204,7 +242,7 @@ bool postTelemetry() {
   return code >= 200 && code < 300;
 }
 
-bool postLocalControl(RoomState& room) {
+bool postLocalControl(RoomState& room, bool fanOn) {
   if (WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client;
   HTTPClient http;
@@ -212,7 +250,7 @@ bool postLocalControl(RoomState& room) {
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<160> payload;
   payload["class_id"] = room.id;
-  payload["fan_on"] = room.fanOn;
+  payload["fan_on"] = fanOn;
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
@@ -269,7 +307,8 @@ void pollRemoteCommands() {
     JsonObject item = classes[room.id].as<JsonObject>();
     long commandId = item["command_id"] | 0L;
     uint32_t controlVersion = item["control_version"] | 0U;
-    if (room.initializedFromCloud && controlVersion == room.lastControlVersion) continue;
+    const RoomSnapshot local = snapshotRoom(room);
+    if (local.initializedFromCloud && controlVersion == local.lastControlVersion) continue;
 
     bool desiredFanOn = item["fan_on"] | false;
     const char* modeText = item["control_mode"] | "AUTO";
@@ -300,8 +339,10 @@ void handleNetworkEvents() {
       Serial.printf("Dashboard: Kelas %s mode MANUAL\n", room.id);
     }
     room.lastCommandId = event.commandId;
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
     room.lastControlVersion = event.controlVersion;
     room.initializedFromCloud = true;
+    if (stateMutex) xSemaphoreGive(stateMutex);
     if (event.commandId > 0) {
       NetEvent ack{NET_ACK_COMMAND, event.roomIndex, room.fanOn, event.setAuto,
                    event.commandId, event.controlVersion};
@@ -318,13 +359,23 @@ void networkTask(void* parameter) {
   for (;;) {
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) {
-      if (roomA.localControlDirty && (uint32_t)(now - lastLocalSyncA) >= 2000) {
+      const RoomSnapshot localA = snapshotRoom(roomA);
+      if (localA.localControlDirty && (uint32_t)(now - lastLocalSyncA) >= 2000) {
         lastLocalSyncA = now;
-        if (postLocalControl(roomA)) roomA.localControlDirty = false;
+        if (postLocalControl(roomA, localA.fanOn)) {
+          if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+          if (roomA.localControlRevision == localA.localControlRevision) roomA.localControlDirty = false;
+          if (stateMutex) xSemaphoreGive(stateMutex);
+        }
       }
-      if (roomB.localControlDirty && (uint32_t)(now - lastLocalSyncB) >= 2000) {
+      const RoomSnapshot localB = snapshotRoom(roomB);
+      if (localB.localControlDirty && (uint32_t)(now - lastLocalSyncB) >= 2000) {
         lastLocalSyncB = now;
-        if (postLocalControl(roomB)) roomB.localControlDirty = false;
+        if (postLocalControl(roomB, localB.fanOn)) {
+          if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+          if (roomB.localControlRevision == localB.localControlRevision) roomB.localControlDirty = false;
+          if (stateMutex) xSemaphoreGive(stateMutex);
+        }
       }
       if ((uint32_t)(now - lastCommandPoll) >= COMMAND_INTERVAL_MS) {
         lastCommandPoll = now;
@@ -355,10 +406,14 @@ void handleButton(RoomState& room, uint32_t now) {
   if ((uint32_t)(now - room.lastDebounceMs) >= BUTTON_DEBOUNCE_MS && raw != room.stableButtonState) {
     room.stableButtonState = raw;
     if (room.stableButtonState == LOW) {
+      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
       room.manualOverride = true;
       room.manualFanState = !room.fanOn;
-      setFan(room, room.manualFanState, "tombol fisik");
+      const bool requestedFanState = room.manualFanState;
       room.localControlDirty = true;
+      room.localControlRevision++;
+      if (stateMutex) xSemaphoreGive(stateMutex);
+      setFan(room, requestedFanState, "tombol fisik");
     }
   }
 }
@@ -400,6 +455,7 @@ void openWiFiConfigPortal() {
 
 void setup() {
   Serial.begin(115200);
+  stateMutex = xSemaphoreCreateMutex();
 
   // Set output latches before switching pins to OUTPUT to minimize relay glitches.
   digitalWrite(RELAY_A_PIN, relayOffLevel());
@@ -432,8 +488,12 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  roomA.motion = (digitalRead(PIR_A_PIN) == HIGH);
-  roomB.motion = (digitalRead(PIR_B_PIN) == HIGH);
+  const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
+  const bool motionB = (digitalRead(PIR_B_PIN) == HIGH);
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  roomA.motion = motionA;
+  roomB.motion = motionB;
+  if (stateMutex) xSemaphoreGive(stateMutex);
 
   bool bothButtonsPressed = digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
   if (bothButtonsPressed) {
@@ -455,9 +515,7 @@ void loop() {
     readRoomTemperature(roomB);
   }
 
-  // Refresh motion timestamp immediately; control is independent per classroom.
-  if (roomA.motion) roomA.lastMotionMs = now;
-  if (roomB.motion) roomB.lastMotionMs = now;
+  // AUTO timestamps the latest motion independently for each classroom.
   applyAutomaticControl(roomA, now);
   applyAutomaticControl(roomB, now);
   handleNetworkEvents();
