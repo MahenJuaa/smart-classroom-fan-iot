@@ -278,8 +278,8 @@ bool postAck(uint8_t roomIndex, long commandId, bool fanOn, bool setAuto) {
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\\n", room.id, commandId, code, HTTPClient::errorToString(code).c_str());
-  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\\n", room.id, commandId, code);
+  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\n", room.id, commandId, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, commandId, code);
   return code >= 200 && code < 300;
 }
 
