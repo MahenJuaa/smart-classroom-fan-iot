@@ -262,24 +262,24 @@ bool postLocalControl(RoomState& room, bool fanOn) {
   return code >= 200 && code < 300;
 }
 
-bool postAck(const NetEvent& event) {
+bool postAck(uint8_t roomIndex, long commandId, bool fanOn, bool setAuto) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  RoomState& room = event.roomIndex == 0 ? roomA : roomB;
+  RoomState& room = roomIndex == 0 ? roomA : roomB;
   WiFiClientSecure client;
   HTTPClient http;
   if (!beginRequest(http, client, "/api/device/ack")) return false;
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<192> payload;
   payload["class_id"] = room.id;
-  payload["command_id"] = event.commandId;
-  payload["fan_on"] = event.fanOn;
-  payload["control_mode"] = event.setAuto ? "AUTO" : "MANUAL";
+  payload["command_id"] = commandId;
+  payload["fan_on"] = fanOn;
+  payload["control_mode"] = setAuto ? "AUTO" : "MANUAL";
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\n", room.id, event.commandId, code, HTTPClient::errorToString(code).c_str());
-  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, event.commandId, code);
+  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\\n", room.id, commandId, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\\n", room.id, commandId, code);
   return code >= 200 && code < 300;
 }
 
@@ -397,7 +397,7 @@ void networkTask(void* parameter) {
     if (ackQueue) {
       NetEvent ack;
       while (xQueueReceive(ackQueue, &ack, 0) == pdTRUE) {
-        if (!postAck(ack)) {
+        if (!postAck(ack.roomIndex, ack.commandId, ack.fanOn, ack.setAuto)) {
           // Keep an unconfirmed dashboard command in the retry queue.
           xQueueSend(ackQueue, &ack, 0);
           vTaskDelay(pdMS_TO_TICKS(1500));
