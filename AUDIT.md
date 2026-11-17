@@ -1,43 +1,50 @@
-# Audit — v3 Cloud IoT + Supabase
+# Audit — Smart Classroom Fan v4 (Vercel + Supabase + AUTO/MANUAL)
 
-## Requirement changes reflected in this version
+## Baseline issues found in v3
 
-The user clarified the target as a full cloud-based IoT system, not an automatic/intelligent control system. The source deck had local PHP/MySQL server architecture and AUTO logic based on a fixed temperature threshold and PIR timeout. This v3 replaces that design with public HTTPS backend hosting plus Supabase PostgreSQL.
+1. Repository documentation described Render/Gunicorn deployment even though the device URL and user deployment target are Vercel.
+2. Backend opened a new PostgreSQL connection for every API request with an 8-second connection timeout. Firmware used a 2.5-second HTTP timeout, so a normal serverless cold start or database connection could exceed the ESP32 read timeout.
+3. Backend command responses omitted `control_mode`, while firmware attempted to read it and defaulted a missing value to `MANUAL`.
+4. Backend and dashboard explicitly documented sensor-only monitoring, while the currently uploaded firmware implemented AUTO from the DHT11 and PIR.
+5. There was no persistent per-room control revision, so a device reboot or remote mode transition with no pending command could leave local control state unsynchronized.
+6. Dashboard pin labels and README pin map did not match the current firmware. Dashboard identified PIR as GPIO32/33, although those pins are relay outputs in the current firmware.
+7. README/dashboard referred to DHT22, but the current firmware compiles the sensor driver as DHT11.
 
-## Functional design
+## v4 changes in this branch
 
-- Two-room sensing with one ESP32.
-- DHT22 and PIR are monitoring inputs only.
-- No automatic rule may toggle relays based on temperature or PIR.
-- Fan is toggled by the dashboard or by a physical per-room button.
-- Sensor telemetry, fan commands, state, and history are stored in Supabase PostgreSQL.
-- Device commands are queued in the database and polled by ESP32.
-- Dashboard is protected by login session; device endpoints use a separate device token.
-- Database credentials stay on backend. Browser and ESP32 do not contain the database password or Supabase secret key.
+- Vercel Flask deployment is documented using the root `app.py` WSGI app entrypoint and Python runtime. `vercel.json` sets function max duration to 30 seconds. Gunicorn is removed from the Vercel requirements.
+- Added a small Psycopg connection pool for warm serverless function instances. Pool size is one; SSL is required; prepared statements are disabled for Supabase shared transaction pooler compatibility; connection and pool wait timeouts are bounded.
+- `.env.example` now instructs the operator to use the Supabase Transaction Pooler connection URI (port 6543) for Vercel.
+- Added per-room `control_mode` and `control_version` to the schema. The schema is additive/re-runnable for an existing v3 database and does not drop sensor/fan history.
+- Device command responses include mode and revision even when no command is pending.
+- Dashboard supports per-room AUTO and MANUAL control. ON/OFF changes to MANUAL; AUTO resumes the local ESP32 rule.
+- Physical button synchronization sets that room to MANUAL and increments its control revision.
+- Telemetry only mirrors actual relay state into desired state while a room is in AUTO. It does not overwrite desired state in MANUAL.
+- Acknowledgements do not increment control revision, preventing a redundant repeat synchronization.
+- Firmware syncs cloud state on initial connection and whenever the room control revision changes, including when command_id is zero. Cloud requests use a 15-second timeout in the separate network task, with local PIR/button/relay logic still running in the main loop.
+- Firmware command polling and telemetry intervals are 5 and 15 seconds respectively.
+- Dashboard pin labels and docs now match the current firmware: DHT11 A/B GPIO16/17, PIR A/B GPIO26/25, relay A/B GPIO32/33, buttons A/B GPIO27/14.
 
-## Source files changed
+## Expected control behavior
 
-- `app.py`: Flask API changed from PyMySQL/MySQL to psycopg/PostgreSQL; adds session login, CSRF check, device token protection, Supabase-backed telemetry, remote command queue, command acknowledgment, local button sync, and histories.
-- `schema.sql`: PostgreSQL schema for device, classroom current state, sensor history, fan command queue, and fan history; RLS enabled and public/ authenticated table grants revoked.
-- `firmware/smart_classroom_fan.ino`: no temperature or PIR-based fan automation; physical buttons toggle relays; telemetry and cloud command polling use HTTPS API.
-- `templates/index.html`: monitoring-only sensor cards and direct ON/OFF dashboard controls; removes AUTO/MANUAL and temperature threshold controls.
-- `templates/login.html`: adds dashboard login screen.
-- `README.md`: setup, Supabase, deployment, cloud data flow, TLS, hardware, and testing instructions.
-- `API.md`: endpoint and payload contract.
+- AUTO, temperature >=30°C + motion -> fan ON.
+- AUTO, temperature below 30°C -> fan OFF.
+- AUTO, no motion for 5 minutes since last detected motion -> fan OFF.
+- A physical button moves only its own classroom into MANUAL.
+- Dashboard ON/OFF moves only the selected classroom into MANUAL.
+- Dashboard AUTO releases manual override and resumes local control.
+- Internet/cloud failure does not stop local sensor sampling, button input, timer, or relay decisions.
 
-## Static checks performed
+## Validation still required
 
-- Python source compiled with `py_compile`.
-- Dashboard JavaScript checked with `node --check`.
-- Archive contents listed and checked.
+The following have not been proven by a live deployment in this audit:
+- Vercel environment values are correctly set, particularly the Supabase Transaction Pooler DATABASE_URL.
+- Current SQL schema has been executed successfully in the user's Supabase project.
+- Deployed `/api/health` returns a healthy database response.
+- The Git branch preview deployment works with the project's Vercel settings.
+- ESP32 firmware compiles against the user's installed ESP32 board package and Arduino libraries.
+- ESP32 returns successful HTTP 2xx responses from Vercel.
+- TLS certificate validation is configured for production. The prototype firmware still has `INSECURE_TLS_FOR_TESTING=true`; this bypasses certificate verification and must be disabled before production use.
+- GPIO, relay active level, 24V fan load, and startup current are physically tested.
 
-## Not live-tested
-
-- Arduino compilation against the user's exact ESP32 board core and installed libraries.
-- Import/execution of `schema.sql` on a real Supabase project.
-- Cloud database connection using the user's connection string.
-- Hosting deployment, HTTPS certificate validation, dashboard session login in deployed environment.
-- ESP32 Wi-Fi/API communication.
-- GPIO relay behavior, sensors, push buttons, 24V fan load, startup current, or power adapter under simultaneous load.
-
-Do not describe this package as proven live-working until those tests pass. In particular, firmware currently leaves `INSECURE_TLS_FOR_TESTING=true` for prototype bring-up; production deployment must set it to `false` and provide a trusted root CA certificate in `ROOT_CA_CERT`.
+Do not claim the system is fully validated until these checks pass. This branch is a prepared patch for review/deployment testing, not a claim that the live hardware has already been proven.
