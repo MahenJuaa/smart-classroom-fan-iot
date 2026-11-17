@@ -126,6 +126,7 @@ uint32_t bothButtonsHeldSinceMs = 0;
 bool wifiPortalTriggered = false;
 String activePortalName;
 String activePortalPassword;
+WiFiManager wifiManager;
 
 // HTTP work runs on a separate FreeRTOS task. Local control never waits for it.
 enum NetEventType : uint8_t { NET_REMOTE_COMMAND, NET_ACK_COMMAND };
@@ -238,7 +239,8 @@ bool postTelemetry() {
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("Telemetry HTTP %d\n", code);
+  if (code < 0) Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("Telemetry HTTP %d\n", code);
   return code >= 200 && code < 300;
 }
 
@@ -255,7 +257,8 @@ bool postLocalControl(RoomState& room, bool fanOn) {
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("Sync tombol Kelas %s HTTP %d\n", room.id, code);
+  if (code < 0) Serial.printf("Sync tombol Kelas %s HTTP %d (%s)\n", room.id, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("Sync tombol Kelas %s HTTP %d\n", room.id, code);
   return code >= 200 && code < 300;
 }
 
@@ -275,7 +278,8 @@ bool postAck(const NetEvent& event) {
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, event.commandId, code);
+  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\n", room.id, event.commandId, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, event.commandId, code);
   return code >= 200 && code < 300;
 }
 
@@ -286,7 +290,8 @@ void pollRemoteCommands() {
   if (!beginRequest(http, client, "/api/device/commands")) return;
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    Serial.printf("GET commands HTTP %d\n", code);
+    if (code < 0) Serial.printf("GET commands HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
+    else Serial.printf("GET commands HTTP %d\n", code);
     http.end();
     return;
   }
@@ -437,19 +442,21 @@ void makePortalCredentials(String& apName, String& apPassword) {
 void startWiFi(bool forcePortal = false) {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFiManager manager;
-  manager.setDebugOutput(true);
-  manager.setConnectTimeout(20);
-  manager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
-  manager.setWiFiAutoReconnect(true);
+  wifiManager.setDebugOutput(true);
+  wifiManager.setConnectTimeout(10);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+  wifiManager.setWiFiAutoReconnect(true);
+  wifiManager.setConfigPortalBlocking(false);
   makePortalCredentials(activePortalName, activePortalPassword);
+
   bool connected = forcePortal
-    ? manager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
-    : manager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
+    ? wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
+    : wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
+
   if (connected && WiFi.status() == WL_CONNECTED) {
     Serial.printf("Wi-Fi connected | IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    Serial.println("Wi-Fi belum tersambung. Kontrol lokal tetap berjalan.");
+    Serial.println("Wi-Fi belum tersambung; portal berjalan non-blocking jika diperlukan.");
   }
 }
 
@@ -493,6 +500,7 @@ void setup() {
 }
 
 void loop() {
+  wifiManager.process();
   uint32_t now = millis();
 
   const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
