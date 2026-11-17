@@ -48,8 +48,8 @@ static const uint8_t PIR_A_PIN = 26;
 static const uint8_t PIR_B_PIN = 25;
 static const uint8_t RELAY_A_PIN = 32;
 static const uint8_t RELAY_B_PIN = 33;
-static const uint8_t BUTTON_A_PIN = 27;
-static const uint8_t BUTTON_B_PIN = 14;
+static const uint8_t BUTTON_A_PIN = 14;
+static const uint8_t BUTTON_B_PIN = 27;
 
 #define DHT_TYPE DHT11
 DHT dhtA(DHT_A_PIN, DHT_TYPE);
