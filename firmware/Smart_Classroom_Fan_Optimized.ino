@@ -390,7 +390,12 @@ void networkTask(void* parameter) {
     if (ackQueue) {
       NetEvent ack;
       while (xQueueReceive(ackQueue, &ack, 0) == pdTRUE) {
-        postAck(ack);
+        if (!postAck(ack)) {
+          // Keep an unconfirmed dashboard command in the retry queue.
+          xQueueSend(ackQueue, &ack, 0);
+          vTaskDelay(pdMS_TO_TICKS(1500));
+          break;
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -406,14 +411,16 @@ void handleButton(RoomState& room, uint32_t now) {
   if ((uint32_t)(now - room.lastDebounceMs) >= BUTTON_DEBOUNCE_MS && raw != room.stableButtonState) {
     room.stableButtonState = raw;
     if (room.stableButtonState == LOW) {
-      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+      const RoomSnapshot current = snapshotRoom(room);
       room.manualOverride = true;
-      room.manualFanState = !room.fanOn;
-      const bool requestedFanState = room.manualFanState;
+      room.manualFanState = !current.fanOn;
+      setFan(room, room.manualFanState, "tombol fisik");
+
+      // Mark sync dirty only after the relay state is updated.
+      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
       room.localControlDirty = true;
       room.localControlRevision++;
       if (stateMutex) xSemaphoreGive(stateMutex);
-      setFan(room, requestedFanState, "tombol fisik");
     }
   }
 }
