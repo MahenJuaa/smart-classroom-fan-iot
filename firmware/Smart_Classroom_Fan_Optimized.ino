@@ -321,8 +321,10 @@ void pollRemoteCommands() {
 
     NetEvent event{NET_REMOTE_COMMAND, i, desiredFanOn, setAuto, commandId, controlVersion};
     if (netEventQueue && xQueueSend(netEventQueue, &event, 0) == pdTRUE) {
+      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
       room.lastControlVersion = controlVersion;
       room.initializedFromCloud = true;
+      if (stateMutex) xSemaphoreGive(stateMutex);
     }
   }
 }
@@ -461,7 +463,7 @@ void startWiFi(bool forcePortal = false) {
 }
 
 void openWiFiConfigPortal() {
-  startWiFi(true); // This setup portal is intentionally blocking while configuration is active.
+  startWiFi(true); // Setup portal is non-blocking; loop() services wifiManager.process().
   roomA.lastButtonRaw = roomA.stableButtonState = digitalRead(BUTTON_A_PIN);
   roomB.lastButtonRaw = roomB.stableButtonState = digitalRead(BUTTON_B_PIN);
   roomA.lastDebounceMs = roomB.lastDebounceMs = millis();
