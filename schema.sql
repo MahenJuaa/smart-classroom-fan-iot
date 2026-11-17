@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS classroom_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT valid_temperature CHECK (temperature IS NULL OR temperature BETWEEN -20 AND 80),
     CONSTRAINT valid_humidity CHECK (humidity IS NULL OR humidity BETWEEN 0 AND 100),
-    CONSTRAINT valid_control_mode CHECK (control_mode IN ('AUTO', 'MANUAL'))
+    CONSTRAINT classroom_state_valid_control_mode CHECK (control_mode IN ('AUTO', 'MANUAL'))
 );
 
 CREATE TABLE IF NOT EXISTS sensor_logs (
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS fan_commands (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     class_id TEXT NOT NULL REFERENCES classroom_state(class_id) ON DELETE CASCADE,
     desired_fan_on BOOLEAN NOT NULL,
-    control_mode TEXT NOT NULL DEFAULT 'MANUAL' CHECK (control_mode IN ('AUTO', 'MANUAL')),
+    control_mode TEXT NOT NULL DEFAULT 'MANUAL',
     source TEXT NOT NULL DEFAULT 'dashboard' CHECK (source IN ('dashboard')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'superseded')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
