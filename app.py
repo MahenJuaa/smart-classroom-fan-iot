@@ -387,8 +387,7 @@ def acknowledge_command():
                 previous = cur.fetchone()
                 cur.execute(
                     """UPDATE classroom_state
-                       SET fan_on=%s, desired_fan_on=%s, control_mode=%s,
-                           control_version=control_version + 1, updated_at=NOW()
+                       SET fan_on=%s, desired_fan_on=%s, control_mode=%s, updated_at=NOW()
                        WHERE class_id=%s""", (fan_on, fan_on, control_mode, cid)
                 )
                 if previous and bool(previous["fan_on"]) != fan_on:
