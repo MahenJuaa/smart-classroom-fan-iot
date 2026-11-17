@@ -31,6 +31,16 @@
 #include <DHT.h>
 #include <math.h>
 
+// Create secrets.h from secrets.example.h. Never commit secrets.h.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Missing secrets.h: copy secrets.example.h to secrets.h and set DEVICE_TOKEN."
+#endif
+#ifndef DEVICE_TOKEN
+#error "Define DEVICE_TOKEN in secrets.h before compiling."
+#endif
+
 // ---------------- PIN CONFIGURATION ----------------
 static const uint8_t DHT_A_PIN = 16;
 static const uint8_t DHT_B_PIN = 17;
@@ -47,7 +57,7 @@ DHT dhtB(DHT_B_PIN, DHT_TYPE);
 
 // ---------------- SERVER CONFIGURATION ----------------
 const char* SERVER_BASE_URL = "https://smart-classroom-fan-iot.vercel.app";
-const char* DEVICE_TOKEN = "GANTI_DENGAN_DEVICE_TOKEN_RANDOM_MINIMAL_32_KARAKTER";
+// DEVICE_TOKEN is supplied privately via firmware/secrets.h.
 const bool INSECURE_TLS_FOR_TESTING = true; // prototype only
 const char* ROOT_CA_CERT = R"EOF(
 PASTE_ROOT_CA_CERTIFICATE_HERE
