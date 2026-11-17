@@ -5,7 +5,7 @@
 
   PIN MAP (preserved from supplied sketch)
     CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO27
-    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO18
+    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO14
 
   AUTO:
     temperature >= 30 C AND motion detected -> FAN ON
@@ -58,10 +58,10 @@ static const float TEMP_THRESHOLD_C = 30.0f;
 static const uint32_t NO_MOTION_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 static const uint32_t DHT_INTERVAL_MS = 3000;
 static const uint32_t BUTTON_DEBOUNCE_MS = 45;
-static const uint32_t COMMAND_INTERVAL_MS = 3000;
-static const uint32_t TELEMETRY_INTERVAL_MS = 30000;
+static const uint32_t COMMAND_INTERVAL_MS = 5000;
+static const uint32_t TELEMETRY_INTERVAL_MS = 15000;
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
-static const uint32_t HTTP_TIMEOUT_MS = 2500;
+static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
 static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 300;
 static const bool RELAY_ACTIVE_LOW = true;
@@ -84,6 +84,7 @@ struct RoomState {
   uint32_t lastDebounceMs = 0;
   uint32_t lastMotionMs = 0;
   long lastCommandId = 0;
+  uint32_t lastControlVersion = 0;
   bool initializedFromCloud = false;
   volatile bool localControlDirty = false;
 
@@ -109,6 +110,7 @@ struct NetEvent {
   bool fanOn;
   bool setAuto;
   long commandId;
+  uint32_t controlVersion;
 };
 QueueHandle_t netEventQueue = nullptr;
 QueueHandle_t ackQueue = nullptr;
@@ -230,6 +232,7 @@ bool postAck(const NetEvent& event) {
   payload["class_id"] = room.id;
   payload["command_id"] = event.commandId;
   payload["fan_on"] = event.fanOn;
+  payload["control_mode"] = event.setAuto ? "AUTO" : "MANUAL";
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
@@ -265,14 +268,18 @@ void pollRemoteCommands() {
     if (!classes[room.id].is<JsonObject>()) continue;
     JsonObject item = classes[room.id].as<JsonObject>();
     long commandId = item["command_id"] | 0L;
-    if (commandId <= 0 || commandId == room.lastCommandId) continue;
+    uint32_t controlVersion = item["control_version"] | 0U;
+    if (room.initializedFromCloud && controlVersion == room.lastControlVersion) continue;
 
     bool desiredFanOn = item["fan_on"] | false;
-    const char* modeText = item["control_mode"] | "MANUAL";
+    const char* modeText = item["control_mode"] | "AUTO";
     bool setAuto = (String(modeText).equalsIgnoreCase("AUTO"));
 
-    NetEvent event{NET_REMOTE_COMMAND, i, desiredFanOn, setAuto, commandId};
-    if (netEventQueue) xQueueSend(netEventQueue, &event, 0);
+    NetEvent event{NET_REMOTE_COMMAND, i, desiredFanOn, setAuto, commandId, controlVersion};
+    if (netEventQueue && xQueueSend(netEventQueue, &event, 0) == pdTRUE) {
+      room.lastControlVersion = controlVersion;
+      room.initializedFromCloud = true;
+    }
   }
 }
 
@@ -284,6 +291,7 @@ void handleNetworkEvents() {
     RoomState& room = event.roomIndex == 0 ? roomA : roomB;
     if (event.setAuto) {
       room.manualOverride = false;
+      applyAutomaticControl(room, millis());
       Serial.printf("Dashboard: Kelas %s kembali ke AUTO\n", room.id);
     } else {
       room.manualOverride = true;
@@ -292,8 +300,13 @@ void handleNetworkEvents() {
       Serial.printf("Dashboard: Kelas %s mode MANUAL\n", room.id);
     }
     room.lastCommandId = event.commandId;
-    NetEvent ack{NET_ACK_COMMAND, event.roomIndex, room.fanOn, event.setAuto, event.commandId};
-    if (ackQueue) xQueueSend(ackQueue, &ack, 0);
+    room.lastControlVersion = event.controlVersion;
+    room.initializedFromCloud = true;
+    if (event.commandId > 0) {
+      NetEvent ack{NET_ACK_COMMAND, event.roomIndex, room.fanOn, event.setAuto,
+                   event.commandId, event.controlVersion};
+      if (ackQueue) xQueueSend(ackQueue, &ack, 0);
+    }
   }
 }
 
