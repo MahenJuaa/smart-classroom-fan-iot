@@ -5,7 +5,7 @@
 
   PIN MAP (preserved from supplied sketch)
     CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO27
-    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO18
+    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO14
 
   AUTO:
     temperature >= 30 C AND motion detected -> FAN ON
@@ -58,10 +58,10 @@ static const float TEMP_THRESHOLD_C = 30.0f;
 static const uint32_t NO_MOTION_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 static const uint32_t DHT_INTERVAL_MS = 3000;
 static const uint32_t BUTTON_DEBOUNCE_MS = 45;
-static const uint32_t COMMAND_INTERVAL_MS = 3000;
-static const uint32_t TELEMETRY_INTERVAL_MS = 30000;
+static const uint32_t COMMAND_INTERVAL_MS = 5000;
+static const uint32_t TELEMETRY_INTERVAL_MS = 15000;
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
-static const uint32_t HTTP_TIMEOUT_MS = 2500;
+static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
 static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 300;
 static const bool RELAY_ACTIVE_LOW = true;
@@ -84,8 +84,10 @@ struct RoomState {
   uint32_t lastDebounceMs = 0;
   uint32_t lastMotionMs = 0;
   long lastCommandId = 0;
+  uint32_t lastControlVersion = 0;
   bool initializedFromCloud = false;
-  volatile bool localControlDirty = false;
+  bool localControlDirty = false;
+  uint32_t localControlRevision = 0;
 
   RoomState(const char* roomId, DHT* sensor, uint8_t pir, uint8_t relay, uint8_t button)
     : id(roomId), dht(sensor), pirPin(pir), relayPin(relay), buttonPin(button) {}
@@ -93,6 +95,30 @@ struct RoomState {
 
 RoomState roomA("A", &dhtA, PIR_A_PIN, RELAY_A_PIN, BUTTON_A_PIN);
 RoomState roomB("B", &dhtB, PIR_B_PIN, RELAY_B_PIN, BUTTON_B_PIN);
+SemaphoreHandle_t stateMutex = nullptr;
+
+struct RoomSnapshot {
+  float temperature;
+  float humidity;
+  bool dhtValid;
+  bool motion;
+  bool fanOn;
+  bool localControlDirty;
+  uint32_t localControlRevision;
+  bool initializedFromCloud;
+  uint32_t lastControlVersion;
+};
+
+RoomSnapshot snapshotRoom(RoomState& room) {
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  RoomSnapshot snapshot{
+    room.temperature, room.humidity, room.dhtValid, room.motion, room.fanOn,
+    room.localControlDirty, room.localControlRevision,
+    room.initializedFromCloud, room.lastControlVersion
+  };
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  return snapshot;
+}
 
 uint32_t lastDhtReadMs = 0;
 uint32_t lastWiFiRetryMs = 0;
@@ -100,6 +126,7 @@ uint32_t bothButtonsHeldSinceMs = 0;
 bool wifiPortalTriggered = false;
 String activePortalName;
 String activePortalPassword;
+WiFiManager wifiManager;
 
 // HTTP work runs on a separate FreeRTOS task. Local control never waits for it.
 enum NetEventType : uint8_t { NET_REMOTE_COMMAND, NET_ACK_COMMAND };
@@ -109,6 +136,7 @@ struct NetEvent {
   bool fanOn;
   bool setAuto;
   long commandId;
+  uint32_t controlVersion;
 };
 QueueHandle_t netEventQueue = nullptr;
 QueueHandle_t ackQueue = nullptr;
@@ -121,10 +149,17 @@ void applyRelay(RoomState& room) {
 }
 
 void setFan(RoomState& room, bool on, const char* reason) {
-  if (room.fanOn == on) return;
-  room.fanOn = on;
-  applyRelay(room);
-  Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+  bool changed = false;
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (room.fanOn != on) {
+    room.fanOn = on;
+    digitalWrite(room.relayPin, on ? relayOnLevel() : relayOffLevel());
+    changed = true;
+  }
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (changed) {
+    Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+  }
 }
 
 void applyAutomaticControl(RoomState& room, uint32_t now) {
@@ -133,16 +168,17 @@ void applyAutomaticControl(RoomState& room, uint32_t now) {
     return;
   }
 
+  const RoomSnapshot state = snapshotRoom(room);
   // Fail-safe: without a valid temperature reading, do not start automatically.
-  if (!room.dhtValid || room.temperature < TEMP_THRESHOLD_C) {
-    setFan(room, false, !room.dhtValid ? "sensor suhu tidak valid" : "suhu di bawah ambang");
+  if (!state.dhtValid || state.temperature < TEMP_THRESHOLD_C) {
+    setFan(room, false, !state.dhtValid ? "sensor suhu tidak valid" : "suhu di bawah ambang");
     return;
   }
 
-  if (room.motion) {
+  if (state.motion) {
     room.lastMotionMs = now;
     setFan(room, true, "suhu >= 30 C dan gerakan terdeteksi");
-  } else if (room.fanOn && (uint32_t)(now - room.lastMotionMs) >= NO_MOTION_TIMEOUT_MS) {
+  } else if (state.fanOn && (uint32_t)(now - room.lastMotionMs) >= NO_MOTION_TIMEOUT_MS) {
     setFan(room, false, "tidak ada gerakan selama 5 menit");
   }
 }
@@ -151,12 +187,16 @@ void readRoomTemperature(RoomState& room) {
   float t = room.dht->readTemperature();
   float h = room.dht->readHumidity();
   if (isnan(t) || isnan(h) || h < 0.0f || h > 100.0f || t < -20.0f || t > 80.0f) {
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
     room.dhtValid = false;
+    if (stateMutex) xSemaphoreGive(stateMutex);
     Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
   } else {
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
     room.temperature = t;
     room.humidity = h;
     room.dhtValid = true;
+    if (stateMutex) xSemaphoreGive(stateMutex);
   }
 }
 
@@ -182,27 +222,29 @@ bool postTelemetry() {
   JsonObject classes = payload.createNestedObject("classes");
   RoomState* rooms[] = {&roomA, &roomB};
   for (RoomState* room : rooms) {
+    const RoomSnapshot state = snapshotRoom(*room);
     JsonObject item = classes.createNestedObject(room->id);
-    if (room->dhtValid) {
-      item["temperature"] = room->temperature;
-      item["humidity"] = room->humidity;
+    if (state.dhtValid) {
+      item["temperature"] = state.temperature;
+      item["humidity"] = state.humidity;
     } else {
       item["temperature"] = nullptr;
       item["humidity"] = nullptr;
     }
-    item["motion"] = room->motion;
-    item["fan_on"] = room->fanOn;
+    item["motion"] = state.motion;
+    item["fan_on"] = state.fanOn;
   }
 
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("Telemetry HTTP %d\n", code);
+  if (code < 0) Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("Telemetry HTTP %d\n", code);
   return code >= 200 && code < 300;
 }
 
-bool postLocalControl(RoomState& room) {
+bool postLocalControl(RoomState& room, bool fanOn) {
   if (WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client;
   HTTPClient http;
@@ -210,12 +252,13 @@ bool postLocalControl(RoomState& room) {
   http.addHeader("Content-Type", "application/json");
   StaticJsonDocument<160> payload;
   payload["class_id"] = room.id;
-  payload["fan_on"] = room.fanOn;
+  payload["fan_on"] = fanOn;
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("Sync tombol Kelas %s HTTP %d\n", room.id, code);
+  if (code < 0) Serial.printf("Sync tombol Kelas %s HTTP %d (%s)\n", room.id, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("Sync tombol Kelas %s HTTP %d\n", room.id, code);
   return code >= 200 && code < 300;
 }
 
@@ -230,11 +273,13 @@ bool postAck(const NetEvent& event) {
   payload["class_id"] = room.id;
   payload["command_id"] = event.commandId;
   payload["fan_on"] = event.fanOn;
+  payload["control_mode"] = event.setAuto ? "AUTO" : "MANUAL";
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, event.commandId, code);
+  if (code < 0) Serial.printf("ACK Kelas %s id=%ld HTTP %d (%s)\n", room.id, event.commandId, code, HTTPClient::errorToString(code).c_str());
+  else Serial.printf("ACK Kelas %s id=%ld HTTP %d\n", room.id, event.commandId, code);
   return code >= 200 && code < 300;
 }
 
@@ -245,7 +290,8 @@ void pollRemoteCommands() {
   if (!beginRequest(http, client, "/api/device/commands")) return;
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    Serial.printf("GET commands HTTP %d\n", code);
+    if (code < 0) Serial.printf("GET commands HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
+    else Serial.printf("GET commands HTTP %d\n", code);
     http.end();
     return;
   }
@@ -265,14 +311,21 @@ void pollRemoteCommands() {
     if (!classes[room.id].is<JsonObject>()) continue;
     JsonObject item = classes[room.id].as<JsonObject>();
     long commandId = item["command_id"] | 0L;
-    if (commandId <= 0 || commandId == room.lastCommandId) continue;
+    uint32_t controlVersion = item["control_version"] | 0U;
+    const RoomSnapshot local = snapshotRoom(room);
+    if (local.initializedFromCloud && controlVersion == local.lastControlVersion) continue;
 
     bool desiredFanOn = item["fan_on"] | false;
-    const char* modeText = item["control_mode"] | "MANUAL";
+    const char* modeText = item["control_mode"] | "AUTO";
     bool setAuto = (String(modeText).equalsIgnoreCase("AUTO"));
 
-    NetEvent event{NET_REMOTE_COMMAND, i, desiredFanOn, setAuto, commandId};
-    if (netEventQueue) xQueueSend(netEventQueue, &event, 0);
+    NetEvent event{NET_REMOTE_COMMAND, i, desiredFanOn, setAuto, commandId, controlVersion};
+    if (netEventQueue && xQueueSend(netEventQueue, &event, 0) == pdTRUE) {
+      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+      room.lastControlVersion = controlVersion;
+      room.initializedFromCloud = true;
+      if (stateMutex) xSemaphoreGive(stateMutex);
+    }
   }
 }
 
@@ -284,6 +337,7 @@ void handleNetworkEvents() {
     RoomState& room = event.roomIndex == 0 ? roomA : roomB;
     if (event.setAuto) {
       room.manualOverride = false;
+      applyAutomaticControl(room, millis());
       Serial.printf("Dashboard: Kelas %s kembali ke AUTO\n", room.id);
     } else {
       room.manualOverride = true;
@@ -292,8 +346,15 @@ void handleNetworkEvents() {
       Serial.printf("Dashboard: Kelas %s mode MANUAL\n", room.id);
     }
     room.lastCommandId = event.commandId;
-    NetEvent ack{NET_ACK_COMMAND, event.roomIndex, room.fanOn, event.setAuto, event.commandId};
-    if (ackQueue) xQueueSend(ackQueue, &ack, 0);
+    if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+    room.lastControlVersion = event.controlVersion;
+    room.initializedFromCloud = true;
+    if (stateMutex) xSemaphoreGive(stateMutex);
+    if (event.commandId > 0) {
+      NetEvent ack{NET_ACK_COMMAND, event.roomIndex, room.fanOn, event.setAuto,
+                   event.commandId, event.controlVersion};
+      if (ackQueue) xQueueSend(ackQueue, &ack, 0);
+    }
   }
 }
 
@@ -305,13 +366,23 @@ void networkTask(void* parameter) {
   for (;;) {
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) {
-      if (roomA.localControlDirty && (uint32_t)(now - lastLocalSyncA) >= 2000) {
+      const RoomSnapshot localA = snapshotRoom(roomA);
+      if (localA.localControlDirty && (uint32_t)(now - lastLocalSyncA) >= 2000) {
         lastLocalSyncA = now;
-        if (postLocalControl(roomA)) roomA.localControlDirty = false;
+        if (postLocalControl(roomA, localA.fanOn)) {
+          if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+          if (roomA.localControlRevision == localA.localControlRevision) roomA.localControlDirty = false;
+          if (stateMutex) xSemaphoreGive(stateMutex);
+        }
       }
-      if (roomB.localControlDirty && (uint32_t)(now - lastLocalSyncB) >= 2000) {
+      const RoomSnapshot localB = snapshotRoom(roomB);
+      if (localB.localControlDirty && (uint32_t)(now - lastLocalSyncB) >= 2000) {
         lastLocalSyncB = now;
-        if (postLocalControl(roomB)) roomB.localControlDirty = false;
+        if (postLocalControl(roomB, localB.fanOn)) {
+          if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+          if (roomB.localControlRevision == localB.localControlRevision) roomB.localControlDirty = false;
+          if (stateMutex) xSemaphoreGive(stateMutex);
+        }
       }
       if ((uint32_t)(now - lastCommandPoll) >= COMMAND_INTERVAL_MS) {
         lastCommandPoll = now;
@@ -326,7 +397,12 @@ void networkTask(void* parameter) {
     if (ackQueue) {
       NetEvent ack;
       while (xQueueReceive(ackQueue, &ack, 0) == pdTRUE) {
-        postAck(ack);
+        if (!postAck(ack)) {
+          // Keep an unconfirmed dashboard command in the retry queue.
+          xQueueSend(ackQueue, &ack, 0);
+          vTaskDelay(pdMS_TO_TICKS(1500));
+          break;
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -342,10 +418,16 @@ void handleButton(RoomState& room, uint32_t now) {
   if ((uint32_t)(now - room.lastDebounceMs) >= BUTTON_DEBOUNCE_MS && raw != room.stableButtonState) {
     room.stableButtonState = raw;
     if (room.stableButtonState == LOW) {
+      const RoomSnapshot current = snapshotRoom(room);
       room.manualOverride = true;
-      room.manualFanState = !room.fanOn;
+      room.manualFanState = !current.fanOn;
       setFan(room, room.manualFanState, "tombol fisik");
+
+      // Mark sync dirty only after the relay state is updated.
+      if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
       room.localControlDirty = true;
+      room.localControlRevision++;
+      if (stateMutex) xSemaphoreGive(stateMutex);
     }
   }
 }
@@ -362,24 +444,26 @@ void makePortalCredentials(String& apName, String& apPassword) {
 void startWiFi(bool forcePortal = false) {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFiManager manager;
-  manager.setDebugOutput(true);
-  manager.setConnectTimeout(20);
-  manager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
-  manager.setWiFiAutoReconnect(true);
+  wifiManager.setDebugOutput(true);
+  wifiManager.setConnectTimeout(10);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+  wifiManager.setWiFiAutoReconnect(true);
+  wifiManager.setConfigPortalBlocking(false);
   makePortalCredentials(activePortalName, activePortalPassword);
+
   bool connected = forcePortal
-    ? manager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
-    : manager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
+    ? wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
+    : wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
+
   if (connected && WiFi.status() == WL_CONNECTED) {
     Serial.printf("Wi-Fi connected | IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    Serial.println("Wi-Fi belum tersambung. Kontrol lokal tetap berjalan.");
+    Serial.println("Wi-Fi belum tersambung; portal berjalan non-blocking jika diperlukan.");
   }
 }
 
 void openWiFiConfigPortal() {
-  startWiFi(true); // This setup portal is intentionally blocking while configuration is active.
+  startWiFi(true); // Setup portal is non-blocking; loop() services wifiManager.process().
   roomA.lastButtonRaw = roomA.stableButtonState = digitalRead(BUTTON_A_PIN);
   roomB.lastButtonRaw = roomB.stableButtonState = digitalRead(BUTTON_B_PIN);
   roomA.lastDebounceMs = roomB.lastDebounceMs = millis();
@@ -387,6 +471,7 @@ void openWiFiConfigPortal() {
 
 void setup() {
   Serial.begin(115200);
+  stateMutex = xSemaphoreCreateMutex();
 
   // Set output latches before switching pins to OUTPUT to minimize relay glitches.
   digitalWrite(RELAY_A_PIN, relayOffLevel());
@@ -417,10 +502,15 @@ void setup() {
 }
 
 void loop() {
+  wifiManager.process();
   uint32_t now = millis();
 
-  roomA.motion = (digitalRead(PIR_A_PIN) == HIGH);
-  roomB.motion = (digitalRead(PIR_B_PIN) == HIGH);
+  const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
+  const bool motionB = (digitalRead(PIR_B_PIN) == HIGH);
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  roomA.motion = motionA;
+  roomB.motion = motionB;
+  if (stateMutex) xSemaphoreGive(stateMutex);
 
   bool bothButtonsPressed = digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
   if (bothButtonsPressed) {
@@ -442,9 +532,7 @@ void loop() {
     readRoomTemperature(roomB);
   }
 
-  // Refresh motion timestamp immediately; control is independent per classroom.
-  if (roomA.motion) roomA.lastMotionMs = now;
-  if (roomB.motion) roomB.lastMotionMs = now;
+  // AUTO timestamps the latest motion independently for each classroom.
   applyAutomaticControl(roomA, now);
   applyAutomaticControl(roomB, now);
   handleNetworkEvents();

@@ -1,111 +1,121 @@
-# API Contract — Smart Classroom Fan v3
+# API Contract — Smart Classroom Fan v4
 
-Base URL adalah domain backend publik dengan HTTPS, misalnya `https://your-app.onrender.com`.
+Base URL: the Vercel HTTPS origin, e.g. `https://YOUR-VERCEL-DOMAIN`.
 
 ## Authentication
 
-- Endpoint perangkat membutuhkan header `X-Device-Token: <DEVICE_TOKEN>`.
-- Endpoint dashboard membutuhkan sesi login Flask.
-- Request `POST` dari dashboard juga membutuhkan header `X-CSRF-Token` yang disediakan di meta tag dashboard.
-- Database credential hanya disimpan di environment backend.
+- Device endpoints require `X-Device-Token: <DEVICE_TOKEN>`.
+- Dashboard endpoints require a Flask login session.
+- Dashboard POST requests require `X-CSRF-Token` from the dashboard meta tag.
+- Database credentials stay in Vercel environment variables and are never sent to the browser or ESP32.
+
+## Control model
+
+Every classroom independently stores:
+- `control_mode`: `AUTO` or `MANUAL`.
+- `control_version`: increasing integer revision. It changes when a dashboard command or a physical button state is synchronized.
+- `fan_on`: latest actual relay output state reported by ESP32.
+- `desired_fan_on`: cloud desired/last-confirmed state.
+
+AUTO logic executes locally on ESP32:
+- Temperature >= 30°C and PIR motion -> ON.
+- Temperature < 30°C -> OFF.
+- No motion for 5 minutes -> OFF.
+- A DHT11 read failure fails safe and does not start the fan automatically.
+
+MANUAL is entered by either physical button or dashboard ON/OFF. Dashboard can return a room to AUTO. Cloud failure does not block local control.
 
 ## `GET /api/health`
 
-Public health check. Example response:
+Public health check; also verifies Supabase connectivity.
 
+Success:
 ```json
-{
-  "ok": true,
-  "database": "supabase-postgres",
-  "connected": true,
-  "classrooms_initialized": 2,
-  "initialized": true
-}
+{"ok":true,"database":"supabase-postgres","connected":true,"classrooms_initialized":2,"initialized":true}
 ```
 
 ## `POST /api/device/telemetry`
 
-Device token required. ESP32 sends the latest sensor data and relay output state for both classes.
+Device token required. Sends latest sensor data and relay state for both classes:
 
 ```json
 {
   "classes": {
-    "A": {
-      "temperature": 29.4,
-      "humidity": 62.0,
-      "motion": true,
-      "fan_on": false
-    },
-    "B": {
-      "temperature": 30.1,
-      "humidity": 67.0,
-      "motion": false,
-      "fan_on": true
-    }
+    "A": {"temperature": 29.4, "humidity": 62.0, "motion": true, "fan_on": false},
+    "B": {"temperature": 30.1, "humidity": 67.0, "motion": false, "fan_on": true}
   }
 }
 ```
 
-DHT22 failure is represented by `temperature: null` and `humidity: null`. `motion` and `fan_on` must remain booleans. Telemetry inserts one record for each room into `sensor_logs`, updates current room state and updates device heartbeat.
+DHT11 failure is represented by `temperature: null` and `humidity: null`. `motion` and `fan_on` must be booleans. Telemetry updates sensor state and the actual relay state. In AUTO, `desired_fan_on` is mirrored from the actual state. In MANUAL, telemetry does not overwrite the operator's desired state. It also updates the device heartbeat and inserts sensor history.
 
 ## `GET /api/device/commands`
 
-Device token required. ESP32 polls every 2 seconds.
+Device token required. Returns control state and any pending dashboard command:
 
 ```json
 {
   "ok": true,
   "classes": {
-    "A": {"command_id": 41, "fan_on": true},
-    "B": {"command_id": 0, "fan_on": false}
+    "A": {"command_id": 41, "fan_on": true, "control_mode": "MANUAL", "control_version": 3},
+    "B": {"command_id": 0, "fan_on": false, "control_mode": "AUTO", "control_version": 0}
   }
 }
 ```
 
-`command_id > 0` means a pending dashboard command. `command_id = 0` means no unprocessed dashboard command for that class; `fan_on` remains the desired cloud state for initial synchronization.
+- `command_id > 0`: pending dashboard command to apply and acknowledge.
+- `command_id = 0`: no pending dashboard command; `control_mode` and `control_version` are still authoritative and must be synchronized if the version changed.
+- Device polls every 5 seconds.
 
 ## `POST /api/device/ack`
 
-Device token required. Acknowledges that the ESP32 has set the relay GPIO to the requested state.
+Device token required. Confirms that ESP32 set its relay GPIO to the requested state:
 
 ```json
-{"class_id":"A", "command_id":41, "fan_on":true}
+{"class_id":"A","command_id":41,"fan_on":true,"control_mode":"MANUAL"}
 ```
 
-This confirms the MCU output state, not measured motor rotation. The hardware has no RPM/current feedback sensor.
+This is a GPIO/firmware confirmation, not measured motor rotation. Acknowledgement does not increment `control_version`.
 
 ## `POST /api/device/local-control`
 
-Device token required. Synchronizes a physical button toggle to the cloud.
+Device token required. Synchronizes a physical button toggle to the cloud:
 
 ```json
-{"class_id":"A", "fan_on":true}
+{"class_id":"A","fan_on":true}
 ```
 
-The latest pending remote command for that class is marked superseded so it cannot unexpectedly override the physical button action.
+The API sets that room to MANUAL, increments its control version, and supersedes pending dashboard commands so a stale remote command cannot override the physical button.
 
 ## `POST /api/control`
 
-Dashboard session + CSRF token required. Creates a queued remote control command. Command can be queued even while the device is offline; it is applied when the ESP32 reconnects.
+Dashboard session + CSRF required.
 
+Manual command:
 ```json
-{"class_id":"B", "fan_on":true}
+{"class_id":"B","fan_on":true,"control_mode":"MANUAL"}
 ```
 
-Example response:
-
+Return one class to automatic mode:
 ```json
-{"ok":true,"class_id":"B","desired_fan_on":true,"command_id":42,"queued":true}
+{"class_id":"B","control_mode":"AUTO"}
 ```
+
+The API updates that room's mode/revision and queues a device command. In AUTO, ESP32 uses its local sensor values to decide the relay state. In MANUAL, the dashboard-provided `fan_on` becomes the override state.
 
 ## `GET /api/status`
 
-Dashboard session required. Returns device online status, current sensor values, actual relay state (`fan_on`), desired state (`desired_fan_on`) and pending indicator for both classes.
+Dashboard session required. Returns:
+- Device online status and last heartbeat.
+- Per-class temperature, humidity, and PIR.
+- Actual relay state and desired state.
+- Per-class `control_mode`.
+- Pending command indicator.
 
 ## `GET /api/history?limit=30&class_id=A`
 
-Dashboard session required. Returns sensor records. `class_id` is optional; when provided, it must be `A` or `B`. `limit` is clamped to 1–200.
+Dashboard session required. Sensor history. `class_id` is optional and must be A or B.
 
 ## `GET /api/fan-history?limit=40&class_id=B`
 
-Dashboard session required. Returns fan change events and source: `dashboard`, `physical_button`, or `device_sync`.
+Dashboard session required. Fan transition history with source: `dashboard`, `physical_button`, or `device_sync`.

@@ -6,12 +6,14 @@ import hmac
 import math
 import os
 import secrets
+import threading
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from psycopg.rows import dict_row
@@ -36,19 +38,43 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 DEVICE_ONLINE_SECONDS = max(10, int(os.getenv("DEVICE_ONLINE_SECONDS", "20")))
 VALID_CLASSES = {"A", "B"}
+VALID_CONTROL_MODES = {"AUTO", "MANUAL"}
+
+_db_pool: ConnectionPool | None = None
+_db_pool_lock = threading.Lock()
 
 
 def db():
-    """Open a TLS-protected connection to Supabase Postgres."""
+    """Reuse one small connection pool per warm Vercel function instance."""
+    global _db_pool
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL belum dikonfigurasi")
-    return psycopg.connect(
-        DATABASE_URL,
-        row_factory=dict_row,
-        connect_timeout=8,
-        sslmode="require",
-        prepare_threshold=None,
-    )
+
+    if _db_pool is None:
+        with _db_pool_lock:
+            if _db_pool is None:
+                _db_pool = ConnectionPool(
+                    conninfo=DATABASE_URL,
+                    kwargs={
+                        "row_factory": dict_row,
+                        "connect_timeout": 4,
+                        "sslmode": "require",
+                        # Supabase shared transaction pooler does not support
+                        # named prepared statements.
+                        "prepare_threshold": None,
+                    },
+                    min_size=0,
+                    max_size=1,
+                    timeout=5,
+                    max_idle=60,
+                    max_lifetime=900,
+                    reconnect_timeout=10,
+                    num_workers=1,
+                    open=False,
+                )
+                _db_pool.open(wait=False)
+
+    return _db_pool.connection(timeout=5)
 
 
 def json_object():
@@ -141,7 +167,7 @@ def load_status():
             device = cur.fetchone()
             cur.execute(
                 """SELECT c.class_id, c.temperature, c.humidity, c.motion, c.fan_on,
-                          c.desired_fan_on, c.sensor_updated_at, c.updated_at,
+                          c.desired_fan_on, c.control_mode, c.sensor_updated_at, c.updated_at,
                           EXISTS (SELECT 1 FROM fan_commands f
                                   WHERE f.class_id=c.class_id AND f.status='pending') AS has_pending_command
                    FROM classroom_state c ORDER BY c.class_id"""
@@ -161,6 +187,7 @@ def load_status():
             "motion": bool(row["motion"]),
             "fan_on": bool(row["fan_on"]),
             "desired_fan_on": bool(row["desired_fan_on"]),
+            "control_mode": row["control_mode"],
             "command_pending": bool(row["has_pending_command"]),
             "sensor_updated_at": timestamp_text(row["sensor_updated_at"]),
             "updated_at": timestamp_text(row["updated_at"]),
@@ -281,16 +308,18 @@ def receive_telemetry():
             with conn.cursor() as cur:
                 cur.execute("UPDATE device_state SET last_seen = NOW() WHERE id = 1")
                 for cid, item in validated.items():
-                    cur.execute("SELECT fan_on FROM classroom_state WHERE class_id = %s FOR UPDATE", (cid,))
+                    cur.execute("SELECT fan_on, control_mode FROM classroom_state WHERE class_id = %s FOR UPDATE", (cid,))
                     previous = cur.fetchone()
                     if not previous:
                         return jsonify({"ok": False, "error": f"Kelas {cid} belum diinisialisasi."}), 503
                     cur.execute(
                         """UPDATE classroom_state
                            SET temperature=%s, humidity=%s, motion=%s, fan_on=%s,
+                               desired_fan_on=CASE WHEN control_mode='AUTO' THEN %s ELSE desired_fan_on END,
                                sensor_updated_at=NOW(), updated_at=NOW()
                            WHERE class_id=%s""",
-                        (item["temperature"], item["humidity"], item["motion"], item["fan_on"], cid),
+                        (item["temperature"], item["humidity"], item["motion"], item["fan_on"],
+                         item["fan_on"], cid),
                     )
                     cur.execute(
                         """INSERT INTO sensor_logs
@@ -313,14 +342,16 @@ def device_commands():
             with conn.cursor() as cur:
                 cur.execute("UPDATE device_state SET last_seen=NOW() WHERE id=1")
                 cur.execute(
-                    """SELECT c.class_id, c.desired_fan_on,
+                    """SELECT c.class_id, c.desired_fan_on, c.control_mode, c.control_version,
                               COALESCE((SELECT MAX(f.id) FROM fan_commands f
                                         WHERE f.class_id=c.class_id AND f.status='pending'), 0) AS command_id
                        FROM classroom_state c ORDER BY c.class_id"""
                 )
                 rows = cur.fetchall()
         classes = {row["class_id"]: {"command_id": int(row["command_id"]),
-                                     "fan_on": bool(row["desired_fan_on"])} for row in rows}
+                                     "fan_on": bool(row["desired_fan_on"]),
+                                     "control_mode": row["control_mode"],
+                                     "control_version": int(row["control_version"])} for row in rows}
         if set(classes) != VALID_CLASSES:
             return jsonify({"ok": False, "error": "Kelas A dan B belum diinisialisasi."}), 503
         return jsonify({"ok": True, "classes": classes})
@@ -337,15 +368,17 @@ def acknowledge_command():
     cid = class_id_value(data.get("class_id"))
     command_id = data.get("command_id")
     fan_on = bool_value(data.get("fan_on"))
-    if cid is None or isinstance(command_id, bool) or not isinstance(command_id, int) or command_id < 1 or fan_on is None:
-        return jsonify({"ok": False, "error": "class_id, command_id, dan fan_on tidak valid."}), 400
+    control_mode = str(data.get("control_mode", "MANUAL")).upper()
+    if (cid is None or isinstance(command_id, bool) or not isinstance(command_id, int)
+            or command_id < 1 or fan_on is None or control_mode not in VALID_CONTROL_MODES):
+        return jsonify({"ok": False, "error": "class_id, command_id, fan_on, atau control_mode tidak valid."}), 400
     try:
         with db() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """UPDATE fan_commands SET status='applied', applied_at=NOW()
-                       WHERE id=%s AND class_id=%s AND status='pending' AND desired_fan_on=%s
-                       RETURNING id""", (command_id, cid, fan_on)
+                       WHERE id=%s AND class_id=%s AND status='pending'
+                       RETURNING id""", (command_id, cid)
                 )
                 applied = cur.fetchone()
                 if not applied:
@@ -353,13 +386,14 @@ def acknowledge_command():
                 cur.execute("SELECT fan_on FROM classroom_state WHERE class_id=%s FOR UPDATE", (cid,))
                 previous = cur.fetchone()
                 cur.execute(
-                    """UPDATE classroom_state SET fan_on=%s, desired_fan_on=%s, updated_at=NOW()
-                       WHERE class_id=%s""", (fan_on, fan_on, cid)
+                    """UPDATE classroom_state
+                       SET fan_on=%s, desired_fan_on=%s, control_mode=%s, updated_at=NOW()
+                       WHERE class_id=%s""", (fan_on, fan_on, control_mode, cid)
                 )
                 if previous and bool(previous["fan_on"]) != fan_on:
                     add_fan_log(cur, cid, fan_on, "dashboard")
                 cur.execute("UPDATE device_state SET last_seen=NOW() WHERE id=1")
-        return jsonify({"ok": True, "class_id": cid, "fan_on": fan_on})
+        return jsonify({"ok": True, "class_id": cid, "fan_on": fan_on, "control_mode": control_mode})
     except Exception:
         return database_error()
 
@@ -383,7 +417,9 @@ def physical_control_sync():
                     return jsonify({"ok": False, "error": f"Kelas {cid} belum ada di database."}), 503
                 cur.execute("UPDATE fan_commands SET status='superseded' WHERE class_id=%s AND status='pending'", (cid,))
                 cur.execute(
-                    """UPDATE classroom_state SET fan_on=%s, desired_fan_on=%s, updated_at=NOW()
+                    """UPDATE classroom_state
+                       SET fan_on=%s, desired_fan_on=%s, control_mode='MANUAL',
+                           control_version=control_version + 1, updated_at=NOW()
                        WHERE class_id=%s""", (fan_on, fan_on, cid)
                 )
                 if bool(previous["fan_on"]) != fan_on:
@@ -402,27 +438,40 @@ def control_fan():
     if not data:
         return jsonify({"ok": False, "error": "Payload JSON tidak valid."}), 400
     cid = class_id_value(data.get("class_id"))
-    fan_on = bool_value(data.get("fan_on"))
-    if cid is None or fan_on is None:
-        return jsonify({"ok": False, "error": "Kirim class_id A/B dan fan_on boolean."}), 400
+    control_mode = str(data.get("control_mode", "MANUAL")).upper()
+    if cid is None or control_mode not in VALID_CONTROL_MODES:
+        return jsonify({"ok": False, "error": "class_id harus A/B dan control_mode harus AUTO atau MANUAL."}), 400
+
+    requested_fan = bool_value(data.get("fan_on")) if control_mode == "MANUAL" else None
+    if control_mode == "MANUAL" and requested_fan is None:
+        return jsonify({"ok": False, "error": "Mode MANUAL membutuhkan fan_on boolean."}), 400
+
     try:
         with db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT class_id FROM classroom_state WHERE class_id=%s FOR UPDATE", (cid,))
-                if not cur.fetchone():
+                cur.execute("SELECT class_id, fan_on FROM classroom_state WHERE class_id=%s FOR UPDATE", (cid,))
+                current = cur.fetchone()
+                if not current:
                     return jsonify({"ok": False, "error": f"Kelas {cid} belum diinisialisasi."}), 503
+
+                # In AUTO, the ESP32 decides the relay state from local sensors.
+                # Keep the latest actual state as the queue's acknowledgment value.
+                fan_on = requested_fan if control_mode == "MANUAL" else bool(current["fan_on"])
                 cur.execute("UPDATE fan_commands SET status='superseded' WHERE class_id=%s AND status='pending'", (cid,))
                 cur.execute(
-                    """UPDATE classroom_state SET desired_fan_on=%s, updated_at=NOW()
-                       WHERE class_id=%s""", (fan_on, cid)
+                    """UPDATE classroom_state
+                       SET control_mode=%s, desired_fan_on=%s,
+                           control_version=control_version + 1, updated_at=NOW()
+                       WHERE class_id=%s""", (control_mode, fan_on, cid)
                 )
                 cur.execute(
-                    """INSERT INTO fan_commands (class_id, desired_fan_on, source)
-                       VALUES (%s, %s, 'dashboard') RETURNING id""", (cid, fan_on)
+                    """INSERT INTO fan_commands (class_id, desired_fan_on, control_mode, source)
+                       VALUES (%s, %s, %s, 'dashboard') RETURNING id""",
+                    (cid, fan_on, control_mode)
                 )
                 command_id = int(cur.fetchone()["id"])
-        return jsonify({"ok": True, "class_id": cid, "desired_fan_on": fan_on,
-                        "command_id": command_id, "queued": True})
+        return jsonify({"ok": True, "class_id": cid, "control_mode": control_mode,
+                        "desired_fan_on": fan_on, "command_id": command_id, "queued": True})
     except Exception:
         return database_error()
 
@@ -484,5 +533,5 @@ def fan_history():
 
 
 if __name__ == "__main__":
-    # Local development only. Public deployment should use Gunicorn behind HTTPS.
+    # Local development only. Vercel imports the module-level Flask app instance.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
