@@ -23,7 +23,7 @@
 - Acknowledgements do not increment control revision, preventing a redundant repeat synchronization.
 - Firmware syncs cloud state on initial connection and whenever the room control revision changes, including when command_id is zero. Cloud requests use a 15-second timeout in the separate network task, with local PIR/button/relay logic still running in the main loop.
 - Firmware command polling and telemetry intervals are 5 and 15 seconds respectively.
-- Dashboard pin labels and docs now match the current firmware: DHT11 A/B GPIO16/17, PIR A/B GPIO26/25, relay A/B GPIO32/33, buttons A/B GPIO27/14.
+- Dashboard pin labels and docs now match the current firmware: DHT11 A/B GPIO16/17, PIR A/B GPIO26/25, relay A/B GPIO32/33, buttons A/B GPIO14/27.
 
 ## Expected control behavior
 
