@@ -4,8 +4,8 @@
   WiFiManager + Vercel API + existing endpoint paths
 
   PIN MAP (preserved from supplied sketch)
-    CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO27
-    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO14
+    CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO14
+    CLASS B: DHT11=GPIO17, PIR=GPIO25, RELAY=GPIO33, BUTTON=GPIO27
 
   AUTO:
     temperature >= 30 C AND motion detected -> FAN ON
@@ -48,8 +48,8 @@ static const uint8_t PIR_A_PIN = 26;
 static const uint8_t PIR_B_PIN = 25;
 static const uint8_t RELAY_A_PIN = 32;
 static const uint8_t RELAY_B_PIN = 33;
-static const uint8_t BUTTON_A_PIN = 27;
-static const uint8_t BUTTON_B_PIN = 14;
+static const uint8_t BUTTON_A_PIN = 14;
+static const uint8_t BUTTON_B_PIN = 27;
 
 #define DHT_TYPE DHT11
 DHT dhtA(DHT_A_PIN, DHT_TYPE);
