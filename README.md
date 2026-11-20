@@ -137,9 +137,9 @@ Follow the firmware currently in this branch, not older pin tables or old dashbo
 | DHT11 DATA | GPIO16 | GPIO17 |
 | PIR OUT | GPIO26 | GPIO25 |
 | Relay IN | GPIO32 | GPIO33 |
-| Push button | GPIO27 | GPIO14 |
+| Push button | GPIO14 | GPIO27 |
 
-Button wiring uses INPUT_PULLUP: one terminal to the GPIO and the other to ESP32 GND. GPIO14 is used for Button B in this firmware.
+Button wiring uses INPUT_PULLUP: one terminal to the GPIO and the other to ESP32 GND. GPIO14 is used for Button A and GPIO27 for Button B in this firmware.
 
 ## 9. API behavior
 
