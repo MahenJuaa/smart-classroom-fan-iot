@@ -48,3 +48,13 @@ The following have not been proven by a live deployment in this audit:
 - GPIO, relay active level, 24V fan load, and startup current are physically tested.
 
 Do not claim the system is fully validated until these checks pass. This branch is a prepared patch for review/deployment testing, not a claim that the live hardware has already been proven.
+
+
+## Manual Wi-Fi configuration update
+
+- The primary optimized firmware no longer includes WiFiManager or starts an SCF-Setup portal.
+- Wi-Fi SSID/password are supplied from the private, ignored firmware/secrets.h file.
+- Initial Wi-Fi connection is non-blocking; local sensor sampling, AUTO control, buttons, timers, and relays start even if Wi-Fi is unavailable.
+- The firmware retries the configured SSID/password every 10 seconds.
+- GPIO14 remains Button A and GPIO27 remains Button B.
+- Validation still required: configure local secrets.h, compile with the installed ESP32 board package/libraries, and verify successful association/DHCP plus API HTTP 2xx responses.
