@@ -1,7 +1,7 @@
 /*
   SMART CLASSROOM FAN - OPTIMIZED
   ESP32 / 2 classrooms / DHT11 / PIR / Relay / physical buttons
-  WiFiManager + Vercel API + existing endpoint paths
+  Manual Wi-Fi credentials (private secrets.h) + Vercel API
 
   PIN MAP (preserved from supplied sketch)
     CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO14
@@ -24,7 +24,6 @@
 */
 
 #include <WiFi.h>
-#include <WiFiManager.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -39,6 +38,12 @@
 #endif
 #ifndef DEVICE_TOKEN
 #error "Define DEVICE_TOKEN in secrets.h before compiling."
+#endif
+#ifndef WIFI_SSID
+#error "Define WIFI_SSID in secrets.h before compiling."
+#endif
+#ifndef WIFI_PASSWORD
+#error "Define WIFI_PASSWORD in secrets.h before compiling."
 #endif
 
 // ---------------- PIN CONFIGURATION ----------------
@@ -70,10 +75,8 @@ static const uint32_t DHT_INTERVAL_MS = 3000;
 static const uint32_t BUTTON_DEBOUNCE_MS = 45;
 static const uint32_t COMMAND_INTERVAL_MS = 5000;
 static const uint32_t TELEMETRY_INTERVAL_MS = 15000;
-static const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
+static const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
-static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
-static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 300;
 static const bool RELAY_ACTIVE_LOW = true;
 
 struct RoomState {
@@ -131,11 +134,8 @@ RoomSnapshot snapshotRoom(RoomState& room) {
 }
 
 uint32_t lastDhtReadMs = 0;
-uint32_t bothButtonsHeldSinceMs = 0;
-bool wifiPortalTriggered = false;
-String activePortalName;
-String activePortalPassword;
-WiFiManager wifiManager;
+uint32_t lastWiFiRetryMs = 0;
+bool wifiPreviouslyConnected = false;
 
 // HTTP work runs on a separate FreeRTOS task. Local control never waits for it.
 enum NetEventType : uint8_t { NET_REMOTE_COMMAND, NET_ACK_COMMAND };
@@ -441,41 +441,40 @@ void handleButton(RoomState& room, uint32_t now) {
   }
 }
 
-void makePortalCredentials(String& apName, String& apPassword) {
-  uint64_t chipId = ESP.getEfuseMac();
-  char nameBuffer[32], passwordBuffer[11];
-  snprintf(nameBuffer, sizeof(nameBuffer), "SCF-Setup-%04X", (unsigned int)((chipId >> 32) & 0xFFFF));
-  snprintf(passwordBuffer, sizeof(passwordBuffer), "%010llX", (unsigned long long)(chipId & 0xFFFFFFFFFFULL));
-  apName = nameBuffer;
-  apPassword = passwordBuffer;
-}
+void startWiFi() {
+  Serial.println();
+  Serial.println("[WiFi] Menghubungkan ke jaringan yang ditentukan di secrets.h...");
+  Serial.printf("[WiFi] SSID: %s\n", WIFI_SSID);
 
-void startWiFi(bool forcePortal = false) {
   WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
-  wifiManager.setDebugOutput(true);
-  wifiManager.setConnectTimeout(10);
-  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
-  wifiManager.setWiFiAutoReconnect(true);
-  wifiManager.setConfigPortalBlocking(false);
-  makePortalCredentials(activePortalName, activePortalPassword);
-
-  bool connected = forcePortal
-    ? wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
-    : wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
-
-  if (connected && WiFi.status() == WL_CONNECTED) {
-    Serial.printf("Wi-Fi connected | IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  } else {
-    Serial.println("Wi-Fi belum tersambung; portal berjalan non-blocking jika diperlukan.");
-  }
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Non-blocking: loop lokal dan task kontrol tetap berjalan saat Wi-Fi mencoba tersambung.
 }
 
-void openWiFiConfigPortal() {
-  startWiFi(true); // Setup portal is non-blocking; loop() services wifiManager.process().
-  roomA.lastButtonRaw = roomA.stableButtonState = digitalRead(BUTTON_A_PIN);
-  roomB.lastButtonRaw = roomB.stableButtonState = digitalRead(BUTTON_B_PIN);
-  roomA.lastDebounceMs = roomB.lastDebounceMs = millis();
+void maintainWiFi(uint32_t now) {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiPreviouslyConnected) {
+      wifiPreviouslyConnected = true;
+      Serial.printf("[WiFi] CONNECTED | SSID: %s | IP: %s | RSSI: %d dBm\n",
+                    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    }
+    return;
+  }
+
+  if (wifiPreviouslyConnected) {
+    wifiPreviouslyConnected = false;
+    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\n",
+                  (int)WiFi.status());
+  }
+
+  if ((uint32_t)(now - lastWiFiRetryMs) >= WIFI_RETRY_INTERVAL_MS) {
+    lastWiFiRetryMs = now;
+    Serial.printf("[WiFi] Mencoba koneksi ulang ke SSID: %s\n", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
 }
 
 void setup() {
@@ -501,9 +500,9 @@ void setup() {
   dhtB.begin();
   roomA.lastMotionMs = roomB.lastMotionMs = millis();
 
-  Serial.println("Smart Classroom Fan optimized: AUTO + manual override + cloud.");
-  Serial.println("Tahan kedua tombol 5 detik untuk membuka portal Wi-Fi.");
-  startWiFi(false);
+  Serial.println("Smart Classroom Fan: AUTO + MANUAL override + cloud.");
+  Serial.println("Wi-Fi manual: SSID dan password di firmware/secrets.h.");
+  startWiFi();
 
   netEventQueue = xQueueCreate(8, sizeof(NetEvent));
   ackQueue = xQueueCreate(8, sizeof(NetEvent));
@@ -511,7 +510,6 @@ void setup() {
 }
 
 void loop() {
-  wifiManager.process();
   uint32_t now = millis();
 
   const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
@@ -521,19 +519,9 @@ void loop() {
   roomB.motion = motionB;
   if (stateMutex) xSemaphoreGive(stateMutex);
 
-  bool bothButtonsPressed = digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
-  if (bothButtonsPressed) {
-    if (bothButtonsHeldSinceMs == 0) bothButtonsHeldSinceMs = now;
-    else if (!wifiPortalTriggered && (uint32_t)(now - bothButtonsHeldSinceMs) >= WIFI_CONFIG_HOLD_MS) {
-      wifiPortalTriggered = true;
-      openWiFiConfigPortal();
-    }
-  } else {
-    bothButtonsHeldSinceMs = 0;
-    wifiPortalTriggered = false;
-    handleButton(roomA, now);
-    handleButton(roomB, now);
-  }
+  // Buttons are always dedicated to their own classroom; no portal long-press shortcut.
+  handleButton(roomA, now);
+  handleButton(roomB, now);
 
   if ((uint32_t)(now - lastDhtReadMs) >= DHT_INTERVAL_MS) {
     lastDhtReadMs = now;
@@ -545,6 +533,7 @@ void loop() {
   applyAutomaticControl(roomA, now);
   applyAutomaticControl(roomB, now);
   handleNetworkEvents();
+  maintainWiFi(now);
 
   // No delay(): loop remains responsive to PIR and physical buttons.
   yield();
