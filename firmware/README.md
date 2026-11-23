@@ -16,3 +16,7 @@ Removing it from the latest file does not remove it from Git history.
 ## Manual Wi-Fi
 
 The primary firmware no longer uses WiFiManager. Copy secrets.example.h to secrets.h and set WIFI_SSID and WIFI_PASSWORD to a 2.4 GHz network. Keep secrets.h private and do not commit it. The ESP32 starts local control immediately and retries Wi-Fi in the background every 10 seconds.
+
+## Which sketch to upload
+
+Use **Smart_Classroom_Fan_Optimized.ino** as the active firmware. It uses manual Wi-Fi credentials and does not use WiFiManager. Do not upload the older `Smart_Classroom_Fan_WiFiManager_Fix.ino`; that file is retained only as a historical reference and still uses the old setup portal.
