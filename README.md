@@ -114,15 +114,18 @@ The database is accessed only by the backend. Do not place database passwords or
 ## 7. Firmware setup
 
 Open firmware/Smart_Classroom_Fan_Optimized.ino in Arduino IDE. Install:
-- WiFiManager
 - DHT sensor library by Adafruit
 - Adafruit Unified Sensor
 - ArduinoJson 6.x or 7.x
 
-Set:
-- SERVER_BASE_URL to the Vercel origin, e.g. https://YOUR-VERCEL-DOMAIN.
-- DEVICE_TOKEN to the exact token set in Vercel.
-- Keep Wi-Fi setup through WiFiManager.
+Manual Wi-Fi configuration:
+1. Copy firmware/secrets.example.h to firmware/secrets.h.
+2. In secrets.h, set WIFI_SSID to the exact 2.4 GHz Wi-Fi/hotspot name.
+3. Set WIFI_PASSWORD to that network's password.
+4. Set DEVICE_TOKEN to the exact rotated token configured in Vercel.
+5. Keep secrets.h private; it is excluded by .gitignore and must never be committed.
+
+The ESP32 connects directly with WiFi.begin(WIFI_SSID, WIFI_PASSWORD). There is no SCF-Setup portal or WiFiManager dependency. If Wi-Fi is unavailable, local sensor/button/relay control starts immediately; the network task retries the configured SSID every 10 seconds.
 
 The provided prototype firmware currently has INSECURE_TLS_FOR_TESTING=true. This skips HTTPS certificate validation and is suitable only for temporary testing on a trusted network. Before production use, set it to false and provide the correct trusted root CA in ROOT_CA_CERT.
 
