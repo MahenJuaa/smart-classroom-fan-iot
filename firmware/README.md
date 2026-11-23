@@ -12,3 +12,7 @@ certificate in `ROOT_CA_CERT` and set `INSECURE_TLS_FOR_TESTING = false`.
 
 The token previously embedded in firmware source must be rotated in the backend.
 Removing it from the latest file does not remove it from Git history.
+
+## Manual Wi-Fi
+
+The primary firmware no longer uses WiFiManager. Copy secrets.example.h to secrets.h and set WIFI_SSID and WIFI_PASSWORD to a 2.4 GHz network. Keep secrets.h private and do not commit it. The ESP32 starts local control immediately and retries Wi-Fi in the background every 10 seconds.
