@@ -61,7 +61,11 @@ DHT dhtA(DHT_A_PIN, DHT_TYPE);
 DHT dhtB(DHT_B_PIN, DHT_TYPE);
 
 // ---------------- SERVER CONFIGURATION ----------------
-const char* SERVER_BASE_URL = "https://smart-classroom-fan-iot.vercel.app";
+// Set API_BASE_URL in private secrets.h to target a Vercel Preview deployment.
+#ifndef API_BASE_URL
+#define API_BASE_URL "https://smart-classroom-fan-iot.vercel.app"
+#endif
+const char* SERVER_BASE_URL = API_BASE_URL;
 // DEVICE_TOKEN is supplied privately via firmware/secrets.h.
 const bool INSECURE_TLS_FOR_TESTING = true; // prototype only
 const char* ROOT_CA_CERT = R"EOF(
