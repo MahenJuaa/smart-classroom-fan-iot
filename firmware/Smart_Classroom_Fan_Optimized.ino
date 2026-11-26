@@ -71,10 +71,11 @@ PASTE_ROOT_CA_CERTIFICATE_HERE
 // ---------------- SYSTEM CONFIGURATION ----------------
 static const float TEMP_THRESHOLD_C = 30.0f;
 static const uint32_t NO_MOTION_TIMEOUT_MS = 5UL * 60UL * 1000UL;
-static const uint32_t DHT_INTERVAL_MS = 3000;
+static const uint32_t DHT_INTERVAL_MS = 2500; // DHT11 sampling interval (>2 s)
 static const uint32_t BUTTON_DEBOUNCE_MS = 45;
 static const uint32_t COMMAND_INTERVAL_MS = 5000;
-static const uint32_t TELEMETRY_INTERVAL_MS = 15000;
+static const uint32_t TELEMETRY_INTERVAL_MS = 15000; // heartbeat
+static const uint32_t TELEMETRY_MIN_INTERVAL_MS = 750; // event debounce
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const bool RELAY_ACTIVE_LOW = true;
@@ -101,6 +102,8 @@ struct RoomState {
   bool initializedFromCloud = false;
   bool localControlDirty = false;
   uint32_t localControlRevision = 0;
+  bool telemetryDirty = true;
+  uint32_t telemetryRevision = 0;
 
   RoomState(const char* roomId, DHT* sensor, uint8_t pir, uint8_t relay, uint8_t button)
     : id(roomId), dht(sensor), pirPin(pir), relayPin(relay), buttonPin(button) {}
@@ -120,6 +123,8 @@ struct RoomSnapshot {
   uint32_t localControlRevision;
   bool initializedFromCloud;
   uint32_t lastControlVersion;
+  bool telemetryDirty;
+  uint32_t telemetryRevision;
 };
 
 RoomSnapshot snapshotRoom(RoomState& room) {
@@ -127,7 +132,8 @@ RoomSnapshot snapshotRoom(RoomState& room) {
   RoomSnapshot snapshot{
     room.temperature, room.humidity, room.dhtValid, room.motion, room.fanOn,
     room.localControlDirty, room.localControlRevision,
-    room.initializedFromCloud, room.lastControlVersion
+    room.initializedFromCloud, room.lastControlVersion,
+    room.telemetryDirty, room.telemetryRevision
   };
   if (stateMutex) xSemaphoreGive(stateMutex);
   return snapshot;
@@ -162,6 +168,8 @@ void setFan(RoomState& room, bool on, const char* reason) {
   if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
   if (room.fanOn != on) {
     room.fanOn = on;
+    room.telemetryDirty = true;
+    room.telemetryRevision++;
     digitalWrite(room.relayPin, on ? relayOnLevel() : relayOffLevel());
     changed = true;
   }
@@ -197,18 +205,32 @@ void readRoomTemperature(RoomState& room) {
   float h = room.dht->readHumidity();
   if (isnan(t) || isnan(h) || h < 0.0f || h > 100.0f || t < -20.0f || t > 80.0f) {
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-    room.dhtValid = false;
+    if (room.dhtValid) {
+      room.dhtValid = false;
+      room.telemetryDirty = true;
+      room.telemetryRevision++;
+    }
     if (stateMutex) xSemaphoreGive(stateMutex);
-    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
+    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\\n", room.id);
   } else {
+    bool valueChanged = false;
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+    valueChanged = !room.dhtValid || isnan(room.temperature) || isnan(room.humidity)
+                   || fabsf(room.temperature - t) >= 0.1f
+                   || fabsf(room.humidity - h) >= 0.1f;
     room.temperature = t;
     room.humidity = h;
     room.dhtValid = true;
+    if (valueChanged) {
+      room.telemetryDirty = true;
+      room.telemetryRevision++;
+    }
     if (stateMutex) xSemaphoreGive(stateMutex);
+    if (valueChanged) {
+      Serial.printf("[DHT] Kelas %s: %.1f C | RH %.1f%%\\n", room.id, t, h);
+    }
   }
 }
-
 bool beginRequest(HTTPClient& http, WiFiClientSecure& client, const String& path) {
   if (WiFi.status() != WL_CONNECTED) return false;
   if (INSECURE_TLS_FOR_TESTING) client.setInsecure();
@@ -227,32 +249,44 @@ bool postTelemetry() {
   if (!beginRequest(http, client, "/api/device/telemetry")) return false;
   http.addHeader("Content-Type", "application/json");
 
+  const RoomSnapshot stateA = snapshotRoom(roomA);
+  const RoomSnapshot stateB = snapshotRoom(roomB);
   StaticJsonDocument<512> payload;
   JsonObject classes = payload.createNestedObject("classes");
   RoomState* rooms[] = {&roomA, &roomB};
-  for (RoomState* room : rooms) {
-    const RoomSnapshot state = snapshotRoom(*room);
-    JsonObject item = classes.createNestedObject(room->id);
-    if (state.dhtValid) {
-      item["temperature"] = state.temperature;
-      item["humidity"] = state.humidity;
+  const RoomSnapshot states[] = {stateA, stateB};
+  for (uint8_t i = 0; i < 2; i++) {
+    JsonObject item = classes.createNestedObject(rooms[i]->id);
+    if (states[i].dhtValid) {
+      item["temperature"] = states[i].temperature;
+      item["humidity"] = states[i].humidity;
     } else {
       item["temperature"] = nullptr;
       item["humidity"] = nullptr;
     }
-    item["motion"] = state.motion;
-    item["fan_on"] = state.fanOn;
+    item["motion"] = states[i].motion;
+    item["fan_on"] = states[i].fanOn;
   }
 
   String body;
   serializeJson(payload, body);
   int code = http.POST(body);
   http.end();
-  if (code < 0) Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
-  else Serial.printf("Telemetry HTTP %d\n", code);
-  return code >= 200 && code < 300;
-}
+  if (code < 0) {
+    Serial.printf("Telemetry HTTP %d (%s)\\n", code, HTTPClient::errorToString(code).c_str());
+  } else {
+    Serial.printf("Telemetry HTTP %d\\n", code);
+  }
 
+  const bool success = code >= 200 && code < 300;
+  if (success && stateMutex) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    if (roomA.telemetryRevision == stateA.telemetryRevision) roomA.telemetryDirty = false;
+    if (roomB.telemetryRevision == stateB.telemetryRevision) roomB.telemetryDirty = false;
+    xSemaphoreGive(stateMutex);
+  }
+  return success;
+}
 bool postLocalControl(RoomState& room, bool fanOn) {
   if (WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client;
@@ -397,7 +431,11 @@ void networkTask(void* parameter) {
         lastCommandPoll = now;
         pollRemoteCommands();
       }
-      if ((uint32_t)(now - lastTelemetry) >= TELEMETRY_INTERVAL_MS) {
+      const RoomSnapshot telemetryA = snapshotRoom(roomA);
+      const RoomSnapshot telemetryB = snapshotRoom(roomB);
+      const bool hasTelemetryChange = telemetryA.telemetryDirty || telemetryB.telemetryDirty;
+      if ((hasTelemetryChange && (uint32_t)(now - lastTelemetry) >= TELEMETRY_MIN_INTERVAL_MS)
+          || (uint32_t)(now - lastTelemetry) >= TELEMETRY_INTERVAL_MS) {
         lastTelemetry = now;
         postTelemetry();
       }
@@ -498,6 +536,7 @@ void setup() {
 
   dhtA.begin();
   dhtB.begin();
+  lastDhtReadMs = millis() - DHT_INTERVAL_MS; // first sample immediately
   roomA.lastMotionMs = roomB.lastMotionMs = millis();
 
   Serial.println("Smart Classroom Fan: AUTO + MANUAL override + cloud.");
@@ -514,10 +553,24 @@ void loop() {
 
   const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
   const bool motionB = (digitalRead(PIR_B_PIN) == HIGH);
+  bool motionAChanged = false;
+  bool motionBChanged = false;
   if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-  roomA.motion = motionA;
-  roomB.motion = motionB;
+  if (roomA.motion != motionA) {
+    roomA.motion = motionA;
+    roomA.telemetryDirty = true;
+    roomA.telemetryRevision++;
+    motionAChanged = true;
+  }
+  if (roomB.motion != motionB) {
+    roomB.motion = motionB;
+    roomB.telemetryDirty = true;
+    roomB.telemetryRevision++;
+    motionBChanged = true;
+  }
   if (stateMutex) xSemaphoreGive(stateMutex);
+  if (motionAChanged) Serial.printf("[PIR] Kelas A: %s\\n", motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionBChanged) Serial.printf("[PIR] Kelas B: %s\\n", motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
 
   // Buttons are always dedicated to their own classroom; no portal long-press shortcut.
   handleButton(roomA, now);
