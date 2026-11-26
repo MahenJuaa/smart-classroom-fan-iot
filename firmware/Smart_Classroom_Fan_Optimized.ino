@@ -175,7 +175,8 @@ void setFan(RoomState& room, bool on, const char* reason) {
   }
   if (stateMutex) xSemaphoreGive(stateMutex);
   if (changed) {
-    Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+    Serial.printf("[%lu ms][FAN] Kelas %s: kipas %s (%s)\n",
+                  (unsigned long)millis(), room.id, on ? "ON" : "OFF", reason);
   }
 }
 
@@ -211,7 +212,7 @@ void readRoomTemperature(RoomState& room) {
       room.telemetryRevision++;
     }
     if (stateMutex) xSemaphoreGive(stateMutex);
-    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
+    Serial.printf("[%lu ms][DHT] Kelas %s: pembacaan gagal.\n", (unsigned long)millis(), room.id);
   } else {
     bool valueChanged = false;
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -227,7 +228,7 @@ void readRoomTemperature(RoomState& room) {
     }
     if (stateMutex) xSemaphoreGive(stateMutex);
     if (valueChanged) {
-      Serial.printf("[DHT] Kelas %s: %.1f C | RH %.1f%%\n", room.id, t, h);
+      Serial.printf("[%lu ms][DHT] Kelas %s: %.1f C | RH %.1f%%\n", (unsigned long)millis(), room.id, t, h);
     }
   }
 }
@@ -270,12 +271,18 @@ bool postTelemetry() {
 
   String body;
   serializeJson(payload, body);
+  const uint32_t requestStartedAt = millis();
   int code = http.POST(body);
+  const uint32_t requestDurationMs = (uint32_t)(millis() - requestStartedAt);
   http.end();
   if (code < 0) {
-    Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
+    Serial.printf("[%lu ms][NET] Telemetry HTTP %d (%s), durasi %lu ms\n",
+                  (unsigned long)millis(), code,
+                  HTTPClient::errorToString(code).c_str(),
+                  (unsigned long)requestDurationMs);
   } else {
-    Serial.printf("Telemetry HTTP %d\n", code);
+    Serial.printf("[%lu ms][NET] Telemetry HTTP %d, durasi %lu ms\n",
+                  (unsigned long)millis(), code, (unsigned long)requestDurationMs);
   }
 
   const bool success = code >= 200 && code < 300;
@@ -569,8 +576,8 @@ void loop() {
     motionBChanged = true;
   }
   if (stateMutex) xSemaphoreGive(stateMutex);
-  if (motionAChanged) Serial.printf("[PIR] Kelas A: %s\n", motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
-  if (motionBChanged) Serial.printf("[PIR] Kelas B: %s\n", motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionAChanged) Serial.printf("[%lu ms][PIR] Kelas A: %s\n", (unsigned long)millis(), motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionBChanged) Serial.printf("[%lu ms][PIR] Kelas B: %s\n", (unsigned long)millis(), motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
 
   // Buttons are always dedicated to their own classroom; no portal long-press shortcut.
   handleButton(roomA, now);
