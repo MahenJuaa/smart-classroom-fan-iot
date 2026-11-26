@@ -20,3 +20,14 @@ The primary firmware no longer uses WiFiManager. Copy secrets.example.h to secre
 ## Which sketch to upload
 
 Use **Smart_Classroom_Fan_Optimized.ino** as the active firmware. It uses manual Wi-Fi credentials and does not use WiFiManager. Do not upload the older `Smart_Classroom_Fan_WiFiManager_Fix.ino`; that file is retained only as a historical reference and still uses the old setup portal.
+
+
+## Targeting a Vercel Preview deployment
+
+By default, the firmware sends requests to the production domain. To test a branch without sending device data to production, add an `API_BASE_URL` definition to your private `secrets.h`:
+
+```cpp
+#define API_BASE_URL "https://your-branch-preview.vercel.app"
+```
+
+Use the actual Preview deployment URL shown by Vercel, without a trailing slash. Keep this definition in the ignored private `secrets.h` file; do not commit it. If `API_BASE_URL` is omitted, the firmware uses the production domain.
