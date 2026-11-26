@@ -129,7 +129,9 @@ The ESP32 connects directly with WiFi.begin(WIFI_SSID, WIFI_PASSWORD). There is 
 
 The provided prototype firmware currently has INSECURE_TLS_FOR_TESTING=true. This skips HTTPS certificate validation and is suitable only for temporary testing on a trusted network. Before production use, set it to false and provide the correct trusted root CA in ROOT_CA_CERT.
 
-The ESP32 network task uses a 15-second HTTP timeout. This does not block the sensor/button/relay control loop because cloud requests run on a separate FreeRTOS task. Command polling is every 5 seconds and telemetry is sent every 15 seconds.
+The ESP32 network task uses a 15-second HTTP timeout. This does not block the sensor/button/relay control loop because cloud requests run on a separate FreeRTOS task. Command polling is every 5 seconds. Sensor/fan telemetry is sent shortly after a detected value/state change, with a 15-second heartbeat as a fallback. The dashboard fetches live status every 1 second; sensor and fan history panels refresh every 30 seconds.
+
+For branch testing, the firmware defaults to the production API domain. To direct it to a Vercel Preview deployment instead, define `API_BASE_URL` in the private `firmware/secrets.h` file using the actual Preview URL. The example file documents this optional override.
 
 ## 8. GPIO map in the current firmware
 
