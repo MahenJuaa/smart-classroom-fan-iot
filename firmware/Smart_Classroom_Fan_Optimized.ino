@@ -211,7 +211,7 @@ void readRoomTemperature(RoomState& room) {
       room.telemetryRevision++;
     }
     if (stateMutex) xSemaphoreGive(stateMutex);
-    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\\n", room.id);
+    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
   } else {
     bool valueChanged = false;
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -227,7 +227,7 @@ void readRoomTemperature(RoomState& room) {
     }
     if (stateMutex) xSemaphoreGive(stateMutex);
     if (valueChanged) {
-      Serial.printf("[DHT] Kelas %s: %.1f C | RH %.1f%%\\n", room.id, t, h);
+      Serial.printf("[DHT] Kelas %s: %.1f C | RH %.1f%%\n", room.id, t, h);
     }
   }
 }
@@ -273,9 +273,9 @@ bool postTelemetry() {
   int code = http.POST(body);
   http.end();
   if (code < 0) {
-    Serial.printf("Telemetry HTTP %d (%s)\\n", code, HTTPClient::errorToString(code).c_str());
+    Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
   } else {
-    Serial.printf("Telemetry HTTP %d\\n", code);
+    Serial.printf("Telemetry HTTP %d\n", code);
   }
 
   const bool success = code >= 200 && code < 300;
@@ -569,8 +569,8 @@ void loop() {
     motionBChanged = true;
   }
   if (stateMutex) xSemaphoreGive(stateMutex);
-  if (motionAChanged) Serial.printf("[PIR] Kelas A: %s\\n", motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
-  if (motionBChanged) Serial.printf("[PIR] Kelas B: %s\\n", motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionAChanged) Serial.printf("[PIR] Kelas A: %s\n", motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionBChanged) Serial.printf("[PIR] Kelas B: %s\n", motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
 
   // Buttons are always dedicated to their own classroom; no portal long-press shortcut.
   handleButton(roomA, now);
