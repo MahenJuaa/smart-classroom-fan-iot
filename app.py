@@ -308,10 +308,31 @@ def receive_telemetry():
             with conn.cursor() as cur:
                 cur.execute("UPDATE device_state SET last_seen = NOW() WHERE id = 1")
                 for cid, item in validated.items():
-                    cur.execute("SELECT fan_on, control_mode FROM classroom_state WHERE class_id = %s FOR UPDATE", (cid,))
+                    cur.execute(
+                        """SELECT temperature, humidity, motion, fan_on
+                           FROM classroom_state WHERE class_id = %s FOR UPDATE""", (cid,)
+                    )
                     previous = cur.fetchone()
                     if not previous:
                         return jsonify({"ok": False, "error": f"Kelas {cid} belum diinisialisasi."}), 503
+
+                    old_temp = previous["temperature"]
+                    old_humidity = previous["humidity"]
+                    temperature_changed = (
+                        (old_temp is None) != (item["temperature"] is None)
+                        or (old_temp is not None and item["temperature"] is not None
+                            and abs(float(old_temp) - item["temperature"]) >= 0.1)
+                    )
+                    humidity_changed = (
+                        (old_humidity is None) != (item["humidity"] is None)
+                        or (old_humidity is not None and item["humidity"] is not None
+                            and abs(float(old_humidity) - item["humidity"]) >= 0.1)
+                    )
+                    sensor_changed = (
+                        temperature_changed or humidity_changed
+                        or bool(previous["motion"]) != item["motion"]
+                    )
+
                     cur.execute(
                         """UPDATE classroom_state
                            SET temperature=%s, humidity=%s, motion=%s, fan_on=%s,
@@ -321,12 +342,14 @@ def receive_telemetry():
                         (item["temperature"], item["humidity"], item["motion"], item["fan_on"],
                          item["fan_on"], cid),
                     )
-                    cur.execute(
-                        """INSERT INTO sensor_logs
-                           (class_id, temperature, humidity, motion)
-                           VALUES (%s, %s, %s, %s)""",
-                        (cid, item["temperature"], item["humidity"], item["motion"]),
-                    )
+                    # Heartbeats update live state but do not create duplicate history rows.
+                    if sensor_changed:
+                        cur.execute(
+                            """INSERT INTO sensor_logs
+                               (class_id, temperature, humidity, motion)
+                               VALUES (%s, %s, %s, %s)""",
+                            (cid, item["temperature"], item["humidity"], item["motion"]),
+                        )
                     if bool(previous["fan_on"]) != item["fan_on"]:
                         add_fan_log(cur, cid, item["fan_on"], "device_sync")
         return jsonify({"ok": True})
