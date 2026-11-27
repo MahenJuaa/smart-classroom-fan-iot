@@ -22,11 +22,11 @@ Install these through Arduino IDE → Library Manager:
 ## Wi-Fi captive portal
 
 On first boot, or when saved Wi-Fi credentials cannot connect, the ESP32 creates:
-- Setup Wi-Fi name: `SmartClassroomFan-Setup`
-- Setup Wi-Fi password: `SCFsetup26`
+- Setup Wi-Fi name: `SCF-Setup-XXXX` (suffix is unique per board)
+- Setup Wi-Fi password: randomly generated at startup and printed to Serial Monitor
 - Configuration page: `http://192.168.4.1` (many phones open it automatically)
 
-Connect a phone/laptop to that setup Wi-Fi, select the target **2.4 GHz** router/hotspot in the portal, enter that network's password, and save. WiFiManager stores the credentials in ESP32 NVS; the ESP32 then joins that network and uses it on later boots. The setup AP is only for provisioning, not the normal internet connection.
+Open Serial Monitor at 115200 baud to read the generated setup AP name and password. Connect a phone/laptop to that AP, select the target **2.4 GHz** router/hotspot in the portal, enter that network's password, and save. WiFiManager stores the credentials in ESP32 NVS; the ESP32 then joins that network and uses it on later boots. The setup AP is only for provisioning, not the normal internet connection.
 
 To reopen the setup portal after credentials have been saved, hold both classroom buttons (GPIO14 and GPIO27) simultaneously for 5 seconds. This long-press is reserved for Wi-Fi setup and does not toggle either fan.
 
