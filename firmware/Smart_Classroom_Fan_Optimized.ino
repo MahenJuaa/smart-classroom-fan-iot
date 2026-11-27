@@ -26,6 +26,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WiFiClientSecure.h>
+#include <esp_system.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
@@ -78,8 +79,8 @@ static const uint32_t TELEMETRY_MIN_INTERVAL_MS = 750; // event debounce
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
 static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 600;
-static const char* WIFI_CONFIG_AP_NAME = "SmartClassroomFan-Setup";
-static const char* WIFI_CONFIG_AP_PASSWORD = "SCFsetup26";
+String activePortalName;
+String activePortalPassword;
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const bool RELAY_ACTIVE_LOW = true;
 
@@ -504,11 +505,26 @@ void printWiFiConnected(const char* source) {
                 source, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
+void makeWiFiPortalCredentials() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  const uint32_t randomHigh = esp_random();
+  const uint32_t randomLow = esp_random();
+  char nameBuffer[32];
+  char passwordBuffer[13];
+  snprintf(nameBuffer, sizeof(nameBuffer), "SCF-Setup-%04X",
+           (unsigned int)((chipId >> 32) & 0xFFFF));
+  snprintf(passwordBuffer, sizeof(passwordBuffer), "%08lX%04lX",
+           (unsigned long)randomHigh, (unsigned long)(randomLow & 0xFFFF));
+  activePortalName = nameBuffer;
+  activePortalPassword = passwordBuffer;
+}
+
 void startWiFi() {
+  makeWiFiPortalCredentials();
   Serial.println();
   Serial.println("[WiFi] Memulai WiFiManager captive portal...");
-  Serial.printf("[WiFi] AP setup: %s\n", WIFI_CONFIG_AP_NAME);
-  Serial.println("[WiFi] Password AP setup: SCFsetup26");
+  Serial.printf("[WiFi] AP setup: %s\n", activePortalName.c_str());
+  Serial.printf("[WiFi] Password AP setup: %s\n", activePortalPassword.c_str());
   Serial.println("[WiFi] Pilih jaringan tujuan 2.4 GHz melalui captive portal.");
 
   WiFi.persistent(true); // WiFiManager saves the selected STA credentials in ESP32 NVS.
@@ -524,7 +540,7 @@ void startWiFi() {
 
   // Connect to saved credentials; if none work, start the setup AP without
   // blocking the sensor/control loop. loop() services the portal with process().
-  const bool connected = wifiManager.autoConnect(WIFI_CONFIG_AP_NAME, WIFI_CONFIG_AP_PASSWORD);
+  const bool connected = wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
   if (connected && WiFi.status() == WL_CONNECTED) {
     wifiPreviouslyConnected = true;
     printWiFiConnected("saved credentials");
@@ -532,7 +548,7 @@ void startWiFi() {
   } else {
     wifiPortalActive = (WiFi.getMode() & WIFI_AP) != 0;
     if (wifiPortalActive) {
-      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\n", WIFI_CONFIG_AP_NAME);
+      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\n", activePortalName.c_str());
       Serial.println("[WiFi] Jika portal tidak muncul otomatis, buka http://192.168.4.1");
     } else {
       Serial.printf("[WiFi] AP portal belum aktif. Status=%d\n", (int)WiFi.status());
@@ -547,10 +563,10 @@ void openWiFiConfigPortal() {
   wifiPortalActive = true; // Pause cloud HTTP while WiFiManager handles portal traffic.
   wifiManager.setConfigPortalBlocking(false);
   wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
-  wifiManager.startConfigPortal(WIFI_CONFIG_AP_NAME, WIFI_CONFIG_AP_PASSWORD);
+  wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str());
 
   if ((WiFi.getMode() & WIFI_AP) != 0) {
-    Serial.printf("[WiFi] AP portal aktif: %s\n", WIFI_CONFIG_AP_NAME);
+    Serial.printf("[WiFi] AP portal aktif: %s\n", activePortalName.c_str());
     Serial.println("[WiFi] Buka http://192.168.4.1 jika captive portal tidak terbuka otomatis.");
   } else {
     wifiPortalActive = false;
