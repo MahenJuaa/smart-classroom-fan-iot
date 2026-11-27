@@ -125,7 +125,7 @@ Wi-Fi captive portal:
 1. Copy firmware/secrets.example.h to firmware/secrets.h.
 2. In secrets.h, set only DEVICE_TOKEN to the exact rotated token configured in Vercel (plus optional API_BASE_URL for a Preview deployment).
 3. Keep secrets.h private; it is excluded by .gitignore and must never be committed.
-4. On first boot, ESP32 advertises `SmartClassroomFan-Setup` with setup password `SCFsetup26`. Connect a phone/laptop to it and open `http://192.168.4.1` if the captive portal does not open automatically.
+4. On first boot, ESP32 advertises a board-specific `SCF-Setup-XXXX` access point with a randomly generated password. Read both values from Serial Monitor at 115200 baud, connect a phone/laptop to that AP, and open `http://192.168.4.1` if the captive portal does not open automatically.
 5. Select the target 2.4 GHz Wi-Fi/hotspot, enter that network's password in the portal, then save. WiFiManager stores the credentials in ESP32 NVS; they are not hard-coded in the sketch or secrets.h.
 6. To open the portal again, hold both classroom buttons (GPIO14 and GPIO27) for 5 seconds. This long-press is reserved for Wi-Fi setup and will not toggle the fans.
 
