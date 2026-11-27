@@ -50,14 +50,15 @@ The following have not been proven by a live deployment in this audit:
 Do not claim the system is fully validated until these checks pass. This branch is a prepared patch for review/deployment testing, not a claim that the live hardware has already been proven.
 
 
-## Manual Wi-Fi configuration update
+## Wi-Fi captive portal update
 
-- The primary optimized firmware no longer includes WiFiManager or starts an SCF-Setup portal.
-- Wi-Fi SSID/password are supplied from the private, ignored firmware/secrets.h file.
-- Initial Wi-Fi connection is non-blocking; local sensor sampling, AUTO control, buttons, timers, and relays start even if Wi-Fi is unavailable.
-- The firmware retries the configured SSID/password every 10 seconds.
-- GPIO14 remains Button A and GPIO27 remains Button B.
-- Validation still required: configure local secrets.h, compile with the installed ESP32 board package/libraries, and verify successful association/DHCP plus API HTTP 2xx responses.
+- The active optimized firmware uses WiFiManager with an ESP32 SoftAP/captive portal; home Wi-Fi SSID/password are not compiled into the sketch or private secrets file.
+- First boot (or failed saved-network connection) exposes `SmartClassroomFan-Setup` with setup password `SCFsetup26`. The user selects a 2.4 GHz network and enters its password in the portal at `http://192.168.4.1`.
+- WiFiManager stores the selected network credentials in ESP32 NVS. On later boots, the ESP32 tries the saved network automatically.
+- WiFiManager runs in non-blocking mode and is serviced from the main loop; the sensor/control loop continues while the setup portal is active.
+- Holding both classroom buttons simultaneously for 5 seconds reopens the setup portal. GPIO14 remains Button A and GPIO27 remains Button B; the long-press is consumed by Wi-Fi setup, not fan toggling.
+- The network task pauses cloud HTTP requests while the portal is active.
+- Validation required: install WiFiManager by tzapu in the local Arduino IDE, compile the active optimized sketch, verify initial AP provisioning and saved-NVS reconnection, then verify the two-button portal shortcut and continued local sensor operation.
 
 
 ## Sensor responsiveness tuning
