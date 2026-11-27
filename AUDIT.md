@@ -53,7 +53,7 @@ Do not claim the system is fully validated until these checks pass. This branch 
 ## Wi-Fi captive portal update
 
 - The active optimized firmware uses WiFiManager with an ESP32 SoftAP/captive portal; home Wi-Fi SSID/password are not compiled into the sketch or private secrets file.
-- First boot (or failed saved-network connection) exposes `SmartClassroomFan-Setup` with setup password `SCFsetup26`. The user selects a 2.4 GHz network and enters its password in the portal at `http://192.168.4.1`.
+- First boot (or failed saved-network connection) exposes a board-specific `SCF-Setup-XXXX` AP with a random password printed in Serial Monitor at 115200 baud. The user selects a 2.4 GHz network and enters its password in the portal at `http://192.168.4.1`.
 - WiFiManager stores the selected network credentials in ESP32 NVS. On later boots, the ESP32 tries the saved network automatically.
 - WiFiManager runs in non-blocking mode and is serviced from the main loop; the sensor/control loop continues while the setup portal is active.
 - Holding both classroom buttons simultaneously for 5 seconds reopens the setup portal. GPIO14 remains Button A and GPIO27 remains Button B; the long-press is consumed by Wi-Fi setup, not fan toggling.
