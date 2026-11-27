@@ -460,6 +460,12 @@ void startWiFi(bool forcePortal = false) {
   wifiManager.setConfigPortalBlocking(false);
   makePortalCredentials(activePortalName, activePortalPassword);
 
+  // Cetak kredensial SoftAP ESP32 agar HP/laptop bisa masuk ke portal konfigurasi.
+  // Password ini milik AP "SCF-Setup", bukan password Wi-Fi rumah/hotspot.
+  Serial.printf("[WiFi] SSID AP ESP32      : %s\\n", activePortalName.c_str());
+  Serial.printf("[WiFi] Password AP ESP32  : %s\\n", activePortalPassword.c_str());
+  Serial.println("[WiFi] Buka http://192.168.4.1 setelah HP/laptop terhubung ke AP ESP32.");
+
   bool connected = forcePortal
     ? wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
     : wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
