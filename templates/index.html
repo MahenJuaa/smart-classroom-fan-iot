@@ -21,7 +21,7 @@
   </header>
   <section class="banner"><h2>Monitoring dan Kontrol Dua Ruang Kelas</h2><p>Data DHT11 dan PIR dikirim ke cloud. Mode AUTO mengendalikan kipas secara lokal berdasarkan suhu ≥30°C dan aktivitas PIR; tombol fisik atau dashboard dapat mengambil alih melalui mode MANUAL.</p></section>
 
-  <div class="section-head"><h2>Status Perangkat dan Ruangan</h2><span class="muted">Pembaruan status setiap 3 detik · Waktu WIB</span></div>
+  <div class="section-head"><h2>Status Perangkat dan Ruangan</h2><span class="muted">Pembaruan status setiap 1 detik · Waktu WIB</span></div>
   <section class="rooms">
     <article class="room">
       <div class="room-head"><div class="room-title"><div class="room-icon">🏫</div><div><h3>Kelas A</h3><div class="room-sub">DHT11 A · PIR A · Relay A · Fan A</div></div></div><span class="status-tag" id="motion-tag-A">Menunggu data</span></div>
@@ -162,9 +162,9 @@ async function loadFanHistory() {
 }
 
 refresh(); loadSensorHistory(); loadFanHistory();
-setInterval(refresh, 3000);
-setInterval(loadSensorHistory, 15000);
-setInterval(loadFanHistory, 15000);
+setInterval(refresh, 1000);
+setInterval(loadSensorHistory, 30000);
+setInterval(loadFanHistory, 30000);
 </script>
 </body>
 </html>

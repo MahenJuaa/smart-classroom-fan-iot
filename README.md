@@ -114,19 +114,28 @@ The database is accessed only by the backend. Do not place database passwords or
 ## 7. Firmware setup
 
 Open firmware/Smart_Classroom_Fan_Optimized.ino in Arduino IDE. Install:
-- WiFiManager
+- WiFiManager by tzapu
 - DHT sensor library by Adafruit
 - Adafruit Unified Sensor
 - ArduinoJson 6.x or 7.x
 
-Set:
-- SERVER_BASE_URL to the Vercel origin, e.g. https://YOUR-VERCEL-DOMAIN.
-- DEVICE_TOKEN to the exact token set in Vercel.
-- Keep Wi-Fi setup through WiFiManager.
+The ESP32 core supplies `WiFi.h`, `WiFiClientSecure.h`, and `HTTPClient.h`; these are not installed separately through Library Manager.
+
+Wi-Fi captive portal:
+1. Copy firmware/secrets.example.h to firmware/secrets.h.
+2. In secrets.h, set only DEVICE_TOKEN to the exact rotated token configured in Vercel (plus optional API_BASE_URL for a Preview deployment).
+3. Keep secrets.h private; it is excluded by .gitignore and must never be committed.
+4. On first boot, ESP32 advertises a board-specific `SCF-Setup-XXXX` access point with a randomly generated password. Read both values from Serial Monitor at 115200 baud, connect a phone/laptop to that AP, and open `http://192.168.4.1` if the captive portal does not open automatically.
+5. Select the target 2.4 GHz Wi-Fi/hotspot, enter that network's password in the portal, then save. WiFiManager stores the credentials in ESP32 NVS; they are not hard-coded in the sketch or secrets.h.
+6. To open the portal again, hold both classroom buttons (GPIO14 and GPIO27) for 5 seconds. This long-press is reserved for Wi-Fi setup and will not toggle the fans.
+
+The portal runs non-blocking so local sensor sampling and relay control continue while Wi-Fi is configured. After provisioning, the ESP32 reconnects to saved credentials automatically and retries every 10 seconds after connection loss.
 
 The provided prototype firmware currently has INSECURE_TLS_FOR_TESTING=true. This skips HTTPS certificate validation and is suitable only for temporary testing on a trusted network. Before production use, set it to false and provide the correct trusted root CA in ROOT_CA_CERT.
 
-The ESP32 network task uses a 15-second HTTP timeout. This does not block the sensor/button/relay control loop because cloud requests run on a separate FreeRTOS task. Command polling is every 5 seconds and telemetry is sent every 15 seconds.
+The ESP32 network task uses a 15-second HTTP timeout. This does not block the sensor/button/relay control loop because cloud requests run on a separate FreeRTOS task. Command polling is every 5 seconds. Sensor/fan telemetry is sent shortly after a detected value/state change, with a 15-second heartbeat as a fallback. The dashboard fetches live status every 1 second; sensor and fan history panels refresh every 30 seconds.
+
+For branch testing, the firmware defaults to the production API domain. To direct it to a Vercel Preview deployment instead, define `API_BASE_URL` in the private `firmware/secrets.h` file using the actual Preview URL. The example file documents this optional override.
 
 ## 8. GPIO map in the current firmware
 

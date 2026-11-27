@@ -1,7 +1,7 @@
 /*
   SMART CLASSROOM FAN - OPTIMIZED
   ESP32 / 2 classrooms / DHT11 / PIR / Relay / physical buttons
-  WiFiManager + Vercel API + existing endpoint paths
+  WiFiManager captive portal + Vercel API
 
   PIN MAP (preserved from supplied sketch)
     CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO14
@@ -26,6 +26,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WiFiClientSecure.h>
+#include <esp_system.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
@@ -56,7 +57,11 @@ DHT dhtA(DHT_A_PIN, DHT_TYPE);
 DHT dhtB(DHT_B_PIN, DHT_TYPE);
 
 // ---------------- SERVER CONFIGURATION ----------------
-const char* SERVER_BASE_URL = "https://smart-classroom-fan-iot.vercel.app";
+// Set API_BASE_URL in private secrets.h to target a Vercel Preview deployment.
+#ifndef API_BASE_URL
+#define API_BASE_URL "https://smart-classroom-fan-iot.vercel.app"
+#endif
+const char* SERVER_BASE_URL = API_BASE_URL;
 // DEVICE_TOKEN is supplied privately via firmware/secrets.h.
 const bool INSECURE_TLS_FOR_TESTING = true; // prototype only
 const char* ROOT_CA_CERT = R"EOF(
@@ -66,14 +71,17 @@ PASTE_ROOT_CA_CERTIFICATE_HERE
 // ---------------- SYSTEM CONFIGURATION ----------------
 static const float TEMP_THRESHOLD_C = 30.0f;
 static const uint32_t NO_MOTION_TIMEOUT_MS = 5UL * 60UL * 1000UL;
-static const uint32_t DHT_INTERVAL_MS = 3000;
+static const uint32_t DHT_INTERVAL_MS = 2500; // DHT11 sampling interval (>2 s)
 static const uint32_t BUTTON_DEBOUNCE_MS = 45;
 static const uint32_t COMMAND_INTERVAL_MS = 5000;
-static const uint32_t TELEMETRY_INTERVAL_MS = 15000;
-static const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
-static const uint32_t HTTP_TIMEOUT_MS = 15000;
+static const uint32_t TELEMETRY_INTERVAL_MS = 15000; // heartbeat
+static const uint32_t TELEMETRY_MIN_INTERVAL_MS = 750; // event debounce
+static const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
-static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 300;
+static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 600;
+String activePortalName;
+String activePortalPassword;
+static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const bool RELAY_ACTIVE_LOW = true;
 
 struct RoomState {
@@ -98,10 +106,17 @@ struct RoomState {
   bool initializedFromCloud = false;
   bool localControlDirty = false;
   uint32_t localControlRevision = 0;
+  bool telemetryDirty = true;
+  uint32_t telemetryRevision = 0;
 
   RoomState(const char* roomId, DHT* sensor, uint8_t pir, uint8_t relay, uint8_t button)
     : id(roomId), dht(sensor), pirPin(pir), relayPin(relay), buttonPin(button) {}
 };
+
+WiFiManager wifiManager;
+volatile bool wifiPortalActive = false;
+bool wifiPortalTriggered = false;
+uint32_t bothButtonsHeldSinceMs = 0;
 
 RoomState roomA("A", &dhtA, PIR_A_PIN, RELAY_A_PIN, BUTTON_A_PIN);
 RoomState roomB("B", &dhtB, PIR_B_PIN, RELAY_B_PIN, BUTTON_B_PIN);
@@ -117,6 +132,8 @@ struct RoomSnapshot {
   uint32_t localControlRevision;
   bool initializedFromCloud;
   uint32_t lastControlVersion;
+  bool telemetryDirty;
+  uint32_t telemetryRevision;
 };
 
 RoomSnapshot snapshotRoom(RoomState& room) {
@@ -124,18 +141,16 @@ RoomSnapshot snapshotRoom(RoomState& room) {
   RoomSnapshot snapshot{
     room.temperature, room.humidity, room.dhtValid, room.motion, room.fanOn,
     room.localControlDirty, room.localControlRevision,
-    room.initializedFromCloud, room.lastControlVersion
+    room.initializedFromCloud, room.lastControlVersion,
+    room.telemetryDirty, room.telemetryRevision
   };
   if (stateMutex) xSemaphoreGive(stateMutex);
   return snapshot;
 }
 
 uint32_t lastDhtReadMs = 0;
-uint32_t bothButtonsHeldSinceMs = 0;
-bool wifiPortalTriggered = false;
-String activePortalName;
-String activePortalPassword;
-WiFiManager wifiManager;
+uint32_t lastWiFiRetryMs = 0;
+bool wifiPreviouslyConnected = false;
 
 // HTTP work runs on a separate FreeRTOS task. Local control never waits for it.
 enum NetEventType : uint8_t { NET_REMOTE_COMMAND, NET_ACK_COMMAND };
@@ -162,12 +177,15 @@ void setFan(RoomState& room, bool on, const char* reason) {
   if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
   if (room.fanOn != on) {
     room.fanOn = on;
+    room.telemetryDirty = true;
+    room.telemetryRevision++;
     digitalWrite(room.relayPin, on ? relayOnLevel() : relayOffLevel());
     changed = true;
   }
   if (stateMutex) xSemaphoreGive(stateMutex);
   if (changed) {
-    Serial.printf("Kelas %s: kipas %s (%s)\n", room.id, on ? "ON" : "OFF", reason);
+    Serial.printf("[%lu ms][FAN] Kelas %s: kipas %s (%s)\n",
+                  (unsigned long)millis(), room.id, on ? "ON" : "OFF", reason);
   }
 }
 
@@ -197,18 +215,32 @@ void readRoomTemperature(RoomState& room) {
   float h = room.dht->readHumidity();
   if (isnan(t) || isnan(h) || h < 0.0f || h > 100.0f || t < -20.0f || t > 80.0f) {
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-    room.dhtValid = false;
+    if (room.dhtValid) {
+      room.dhtValid = false;
+      room.telemetryDirty = true;
+      room.telemetryRevision++;
+    }
     if (stateMutex) xSemaphoreGive(stateMutex);
-    Serial.printf("Kelas %s: pembacaan DHT11 gagal.\n", room.id);
+    Serial.printf("[%lu ms][DHT] Kelas %s: pembacaan gagal.\n", (unsigned long)millis(), room.id);
   } else {
+    bool valueChanged = false;
     if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+    valueChanged = !room.dhtValid || isnan(room.temperature) || isnan(room.humidity)
+                   || fabsf(room.temperature - t) >= 0.1f
+                   || fabsf(room.humidity - h) >= 0.1f;
     room.temperature = t;
     room.humidity = h;
     room.dhtValid = true;
+    if (valueChanged) {
+      room.telemetryDirty = true;
+      room.telemetryRevision++;
+    }
     if (stateMutex) xSemaphoreGive(stateMutex);
+    if (valueChanged) {
+      Serial.printf("[%lu ms][DHT] Kelas %s: %.1f C | RH %.1f%%\n", (unsigned long)millis(), room.id, t, h);
+    }
   }
 }
-
 bool beginRequest(HTTPClient& http, WiFiClientSecure& client, const String& path) {
   if (WiFi.status() != WL_CONNECTED) return false;
   if (INSECURE_TLS_FOR_TESTING) client.setInsecure();
@@ -227,32 +259,50 @@ bool postTelemetry() {
   if (!beginRequest(http, client, "/api/device/telemetry")) return false;
   http.addHeader("Content-Type", "application/json");
 
+  const RoomSnapshot stateA = snapshotRoom(roomA);
+  const RoomSnapshot stateB = snapshotRoom(roomB);
   StaticJsonDocument<512> payload;
   JsonObject classes = payload.createNestedObject("classes");
   RoomState* rooms[] = {&roomA, &roomB};
-  for (RoomState* room : rooms) {
-    const RoomSnapshot state = snapshotRoom(*room);
-    JsonObject item = classes.createNestedObject(room->id);
-    if (state.dhtValid) {
-      item["temperature"] = state.temperature;
-      item["humidity"] = state.humidity;
+  const RoomSnapshot states[] = {stateA, stateB};
+  for (uint8_t i = 0; i < 2; i++) {
+    JsonObject item = classes.createNestedObject(rooms[i]->id);
+    if (states[i].dhtValid) {
+      item["temperature"] = states[i].temperature;
+      item["humidity"] = states[i].humidity;
     } else {
       item["temperature"] = nullptr;
       item["humidity"] = nullptr;
     }
-    item["motion"] = state.motion;
-    item["fan_on"] = state.fanOn;
+    item["motion"] = states[i].motion;
+    item["fan_on"] = states[i].fanOn;
   }
 
   String body;
   serializeJson(payload, body);
+  const uint32_t requestStartedAt = millis();
   int code = http.POST(body);
+  const uint32_t requestDurationMs = (uint32_t)(millis() - requestStartedAt);
   http.end();
-  if (code < 0) Serial.printf("Telemetry HTTP %d (%s)\n", code, HTTPClient::errorToString(code).c_str());
-  else Serial.printf("Telemetry HTTP %d\n", code);
-  return code >= 200 && code < 300;
-}
+  if (code < 0) {
+    Serial.printf("[%lu ms][NET] Telemetry HTTP %d (%s), durasi %lu ms\n",
+                  (unsigned long)millis(), code,
+                  HTTPClient::errorToString(code).c_str(),
+                  (unsigned long)requestDurationMs);
+  } else {
+    Serial.printf("[%lu ms][NET] Telemetry HTTP %d, durasi %lu ms\n",
+                  (unsigned long)millis(), code, (unsigned long)requestDurationMs);
+  }
 
+  const bool success = code >= 200 && code < 300;
+  if (success && stateMutex) {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    if (roomA.telemetryRevision == stateA.telemetryRevision) roomA.telemetryDirty = false;
+    if (roomB.telemetryRevision == stateB.telemetryRevision) roomB.telemetryDirty = false;
+    xSemaphoreGive(stateMutex);
+  }
+  return success;
+}
 bool postLocalControl(RoomState& room, bool fanOn) {
   if (WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure client;
@@ -373,6 +423,11 @@ void networkTask(void* parameter) {
   uint32_t lastLocalSyncA = 0;
   uint32_t lastLocalSyncB = 0;
   for (;;) {
+    if (wifiPortalActive) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) {
       const RoomSnapshot localA = snapshotRoom(roomA);
@@ -397,7 +452,11 @@ void networkTask(void* parameter) {
         lastCommandPoll = now;
         pollRemoteCommands();
       }
-      if ((uint32_t)(now - lastTelemetry) >= TELEMETRY_INTERVAL_MS) {
+      const RoomSnapshot telemetryA = snapshotRoom(roomA);
+      const RoomSnapshot telemetryB = snapshotRoom(roomB);
+      const bool hasTelemetryChange = telemetryA.telemetryDirty || telemetryB.telemetryDirty;
+      if ((hasTelemetryChange && (uint32_t)(now - lastTelemetry) >= TELEMETRY_MIN_INTERVAL_MS)
+          || (uint32_t)(now - lastTelemetry) >= TELEMETRY_INTERVAL_MS) {
         lastTelemetry = now;
         postTelemetry();
       }
@@ -441,41 +500,119 @@ void handleButton(RoomState& room, uint32_t now) {
   }
 }
 
-void makePortalCredentials(String& apName, String& apPassword) {
-  uint64_t chipId = ESP.getEfuseMac();
-  char nameBuffer[32], passwordBuffer[11];
-  snprintf(nameBuffer, sizeof(nameBuffer), "SCF-Setup-%04X", (unsigned int)((chipId >> 32) & 0xFFFF));
-  snprintf(passwordBuffer, sizeof(passwordBuffer), "%010llX", (unsigned long long)(chipId & 0xFFFFFFFFFFULL));
-  apName = nameBuffer;
-  apPassword = passwordBuffer;
+void printWiFiConnected(const char* source) {
+  Serial.printf("[WiFi] CONNECTED via %s | SSID: %s | IP: %s | RSSI: %d dBm\n",
+                source, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
-void startWiFi(bool forcePortal = false) {
+void makeWiFiPortalCredentials() {
+  const uint64_t chipId = ESP.getEfuseMac();
+  const uint32_t randomHigh = esp_random();
+  const uint32_t randomLow = esp_random();
+  char nameBuffer[32];
+  char passwordBuffer[13];
+  snprintf(nameBuffer, sizeof(nameBuffer), "SCF-Setup-%04X",
+           (unsigned int)((chipId >> 32) & 0xFFFF));
+  snprintf(passwordBuffer, sizeof(passwordBuffer), "%08lX%04lX",
+           (unsigned long)randomHigh, (unsigned long)(randomLow & 0xFFFF));
+  activePortalName = nameBuffer;
+  activePortalPassword = passwordBuffer;
+}
+
+void startWiFi() {
+  makeWiFiPortalCredentials();
+  Serial.println();
+  Serial.println("[WiFi] Memulai WiFiManager captive portal...");
+  Serial.printf("[WiFi] AP setup: %s\n", activePortalName.c_str());
+  Serial.printf("[WiFi] Password AP setup: %s\n", activePortalPassword.c_str());
+  Serial.println("[WiFi] Pilih jaringan tujuan 2.4 GHz melalui captive portal.");
+
+  WiFi.persistent(true); // WiFiManager saves the selected STA credentials in ESP32 NVS.
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
+
   wifiManager.setDebugOutput(true);
-  wifiManager.setConnectTimeout(10);
+  wifiManager.setConnectTimeout(12);
   wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
   wifiManager.setWiFiAutoReconnect(true);
   wifiManager.setConfigPortalBlocking(false);
-  makePortalCredentials(activePortalName, activePortalPassword);
 
-  bool connected = forcePortal
-    ? wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str())
-    : wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
-
+  // Connect to saved credentials; if none work, start the setup AP without
+  // blocking the sensor/control loop. loop() services the portal with process().
+  const bool connected = wifiManager.autoConnect(activePortalName.c_str(), activePortalPassword.c_str());
   if (connected && WiFi.status() == WL_CONNECTED) {
-    Serial.printf("Wi-Fi connected | IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    wifiPreviouslyConnected = true;
+    printWiFiConnected("saved credentials");
+    wifiPortalActive = false;
   } else {
-    Serial.println("Wi-Fi belum tersambung; portal berjalan non-blocking jika diperlukan.");
+    wifiPortalActive = (WiFi.getMode() & WIFI_AP) != 0;
+    if (wifiPortalActive) {
+      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\n", activePortalName.c_str());
+      Serial.println("[WiFi] Jika portal tidak muncul otomatis, buka http://192.168.4.1");
+    } else {
+      Serial.printf("[WiFi] AP portal belum aktif. Status=%d\n", (int)WiFi.status());
+    }
   }
 }
 
 void openWiFiConfigPortal() {
-  startWiFi(true); // Setup portal is non-blocking; loop() services wifiManager.process().
-  roomA.lastButtonRaw = roomA.stableButtonState = digitalRead(BUTTON_A_PIN);
-  roomB.lastButtonRaw = roomB.stableButtonState = digitalRead(BUTTON_B_PIN);
-  roomA.lastDebounceMs = roomB.lastDebounceMs = millis();
+  if (wifiPortalActive) return;
+
+  Serial.println("[WiFi] Membuka ulang portal konfigurasi atas permintaan tombol.");
+  wifiPortalActive = true; // Pause cloud HTTP while WiFiManager handles portal traffic.
+  wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+  wifiManager.startConfigPortal(activePortalName.c_str(), activePortalPassword.c_str());
+
+  if ((WiFi.getMode() & WIFI_AP) != 0) {
+    Serial.printf("[WiFi] AP portal aktif: %s\n", activePortalName.c_str());
+    Serial.println("[WiFi] Buka http://192.168.4.1 jika captive portal tidak terbuka otomatis.");
+  } else {
+    wifiPortalActive = false;
+    Serial.println("[WiFi] Gagal membuka AP portal. Coba reboot ESP32.");
+  }
+}
+
+void maintainWiFi(uint32_t now) {
+  if (wifiPortalActive) {
+    const bool portalConnected = wifiManager.process();
+    if (portalConnected || WiFi.status() == WL_CONNECTED) {
+      wifiPortalActive = false;
+      wifiPreviouslyConnected = true;
+      lastWiFiRetryMs = now;
+      printWiFiConnected("WiFiManager portal");
+      return;
+    }
+
+    // The portal may close after its 10-minute timeout or a user aborts it.
+    if ((WiFi.getMode() & WIFI_AP) == 0) {
+      wifiPortalActive = false;
+      lastWiFiRetryMs = now;
+      Serial.println("[WiFi] Portal ditutup atau timeout. Kontrol lokal tetap aktif.");
+    }
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiPreviouslyConnected) {
+      wifiPreviouslyConnected = true;
+      printWiFiConnected("reconnect");
+    }
+    return;
+  }
+
+  if (wifiPreviouslyConnected) {
+    wifiPreviouslyConnected = false;
+    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\n",
+                  (int)WiFi.status());
+  }
+
+  if ((uint32_t)(now - lastWiFiRetryMs) >= WIFI_RETRY_INTERVAL_MS) {
+    lastWiFiRetryMs = now;
+    Serial.println("[WiFi] Mencoba koneksi ulang menggunakan kredensial tersimpan...");
+    WiFi.reconnect();
+  }
 }
 
 void setup() {
@@ -499,11 +636,13 @@ void setup() {
 
   dhtA.begin();
   dhtB.begin();
+  lastDhtReadMs = millis() - DHT_INTERVAL_MS; // first sample immediately
   roomA.lastMotionMs = roomB.lastMotionMs = millis();
 
-  Serial.println("Smart Classroom Fan optimized: AUTO + manual override + cloud.");
-  Serial.println("Tahan kedua tombol 5 detik untuk membuka portal Wi-Fi.");
-  startWiFi(false);
+  Serial.println("Smart Classroom Fan: AUTO + MANUAL override + cloud.");
+  Serial.println("Wi-Fi: ESP32 menyediakan captive portal untuk konfigurasi jaringan.");
+  Serial.println("Tahan kedua tombol kelas A dan B selama 5 detik untuk membuka ulang portal.");
+  startWiFi();
 
   netEventQueue = xQueueCreate(8, sizeof(NetEvent));
   ackQueue = xQueueCreate(8, sizeof(NetEvent));
@@ -511,20 +650,35 @@ void setup() {
 }
 
 void loop() {
-  wifiManager.process();
   uint32_t now = millis();
 
   const bool motionA = (digitalRead(PIR_A_PIN) == HIGH);
   const bool motionB = (digitalRead(PIR_B_PIN) == HIGH);
+  bool motionAChanged = false;
+  bool motionBChanged = false;
   if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-  roomA.motion = motionA;
-  roomB.motion = motionB;
+  if (roomA.motion != motionA) {
+    roomA.motion = motionA;
+    roomA.telemetryDirty = true;
+    roomA.telemetryRevision++;
+    motionAChanged = true;
+  }
+  if (roomB.motion != motionB) {
+    roomB.motion = motionB;
+    roomB.telemetryDirty = true;
+    roomB.telemetryRevision++;
+    motionBChanged = true;
+  }
   if (stateMutex) xSemaphoreGive(stateMutex);
+  if (motionAChanged) Serial.printf("[%lu ms][PIR] Kelas A: %s\n", (unsigned long)millis(), motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
+  if (motionBChanged) Serial.printf("[%lu ms][PIR] Kelas B: %s\n", (unsigned long)millis(), motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
 
-  bool bothButtonsPressed = digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
+  const bool bothButtonsPressed =
+      digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
   if (bothButtonsPressed) {
     if (bothButtonsHeldSinceMs == 0) bothButtonsHeldSinceMs = now;
-    else if (!wifiPortalTriggered && (uint32_t)(now - bothButtonsHeldSinceMs) >= WIFI_CONFIG_HOLD_MS) {
+    else if (!wifiPortalTriggered
+             && (uint32_t)(now - bothButtonsHeldSinceMs) >= WIFI_CONFIG_HOLD_MS) {
       wifiPortalTriggered = true;
       openWiFiConfigPortal();
     }
@@ -545,6 +699,7 @@ void loop() {
   applyAutomaticControl(roomA, now);
   applyAutomaticControl(roomB, now);
   handleNetworkEvents();
+  maintainWiFi(now);
 
   // No delay(): loop remains responsive to PIR and physical buttons.
   yield();
