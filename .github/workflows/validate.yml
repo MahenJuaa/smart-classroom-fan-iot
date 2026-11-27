@@ -45,7 +45,7 @@ jobs:
         run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli lib install "DHT sensor library" "Adafruit Unified Sensor" "ArduinoJson"
+          arduino-cli lib install "WiFiManager" "DHT sensor library" "Adafruit Unified Sensor" "ArduinoJson"
       - name: Compile optimized ESP32 firmware
         run: |
           mkdir -p /tmp/Smart_Classroom_Fan_Optimized
