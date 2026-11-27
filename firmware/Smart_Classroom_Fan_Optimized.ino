@@ -1,7 +1,7 @@
 /*
   SMART CLASSROOM FAN - OPTIMIZED
   ESP32 / 2 classrooms / DHT11 / PIR / Relay / physical buttons
-  Manual Wi-Fi credentials (private secrets.h) + Vercel API
+  WiFiManager captive portal + Vercel API
 
   PIN MAP (preserved from supplied sketch)
     CLASS A: DHT11=GPIO16, PIR=GPIO26, RELAY=GPIO32, BUTTON=GPIO14
@@ -24,6 +24,7 @@
 */
 
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -38,12 +39,6 @@
 #endif
 #ifndef DEVICE_TOKEN
 #error "Define DEVICE_TOKEN in secrets.h before compiling."
-#endif
-#ifndef WIFI_SSID
-#error "Define WIFI_SSID in secrets.h before compiling."
-#endif
-#ifndef WIFI_PASSWORD
-#error "Define WIFI_PASSWORD in secrets.h before compiling."
 #endif
 
 // ---------------- PIN CONFIGURATION ----------------
@@ -81,6 +76,10 @@ static const uint32_t COMMAND_INTERVAL_MS = 5000;
 static const uint32_t TELEMETRY_INTERVAL_MS = 15000; // heartbeat
 static const uint32_t TELEMETRY_MIN_INTERVAL_MS = 750; // event debounce
 static const uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
+static const uint32_t WIFI_CONFIG_HOLD_MS = 5000;
+static const uint32_t WIFI_CONFIG_PORTAL_TIMEOUT_SEC = 600;
+static const char* WIFI_CONFIG_AP_NAME = "SmartClassroomFan-Setup";
+static const char* WIFI_CONFIG_AP_PASSWORD = "SCFsetup26";
 static const uint32_t HTTP_TIMEOUT_MS = 15000;
 static const bool RELAY_ACTIVE_LOW = true;
 
@@ -112,6 +111,11 @@ struct RoomState {
   RoomState(const char* roomId, DHT* sensor, uint8_t pir, uint8_t relay, uint8_t button)
     : id(roomId), dht(sensor), pirPin(pir), relayPin(relay), buttonPin(button) {}
 };
+
+WiFiManager wifiManager;
+volatile bool wifiPortalActive = false;
+bool wifiPortalTriggered = false;
+uint32_t bothButtonsHeldSinceMs = 0;
 
 RoomState roomA("A", &dhtA, PIR_A_PIN, RELAY_A_PIN, BUTTON_A_PIN);
 RoomState roomB("B", &dhtB, PIR_B_PIN, RELAY_B_PIN, BUTTON_B_PIN);
@@ -418,6 +422,11 @@ void networkTask(void* parameter) {
   uint32_t lastLocalSyncA = 0;
   uint32_t lastLocalSyncB = 0;
   for (;;) {
+    if (wifiPortalActive) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) {
       const RoomSnapshot localA = snapshotRoom(roomA);
@@ -490,39 +499,103 @@ void handleButton(RoomState& room, uint32_t now) {
   }
 }
 
+void printWiFiConnected(const char* source) {
+  Serial.printf("[WiFi] CONNECTED via %s | SSID: %s | IP: %s | RSSI: %d dBm\\n",
+                source, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+}
+
 void startWiFi() {
   Serial.println();
-  Serial.println("[WiFi] Menghubungkan ke jaringan yang ditentukan di secrets.h...");
-  Serial.printf("[WiFi] SSID: %s\n", WIFI_SSID);
+  Serial.println("[WiFi] Memulai WiFiManager captive portal...");
+  Serial.printf("[WiFi] AP setup: %s\\n", WIFI_CONFIG_AP_NAME);
+  Serial.println("[WiFi] Password AP setup: SCFsetup26");
+  Serial.println("[WiFi] Pilih jaringan tujuan 2.4 GHz melalui captive portal.");
 
+  WiFi.persistent(true); // WiFiManager saves the selected STA credentials in ESP32 NVS.
   WiFi.mode(WIFI_STA);
-  WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  // Non-blocking: loop lokal dan task kontrol tetap berjalan saat Wi-Fi mencoba tersambung.
+
+  wifiManager.setDebugOutput(true);
+  wifiManager.setConnectTimeout(12);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+  wifiManager.setWiFiAutoReconnect(true);
+  wifiManager.setConfigPortalBlocking(false);
+
+  // Connect to saved credentials; if none work, start the setup AP without
+  // blocking the sensor/control loop. loop() services the portal with process().
+  const bool connected = wifiManager.autoConnect(WIFI_CONFIG_AP_NAME, WIFI_CONFIG_AP_PASSWORD);
+  if (connected && WiFi.status() == WL_CONNECTED) {
+    wifiPreviouslyConnected = true;
+    printWiFiConnected("saved credentials");
+    wifiPortalActive = false;
+  } else {
+    wifiPortalActive = (WiFi.getMode() & WIFI_AP) != 0;
+    if (wifiPortalActive) {
+      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\\n", WIFI_CONFIG_AP_NAME);
+      Serial.println("[WiFi] Jika portal tidak muncul otomatis, buka http://192.168.4.1");
+    } else {
+      Serial.printf("[WiFi] AP portal belum aktif. Status=%d\\n", (int)WiFi.status());
+    }
+  }
+}
+
+void openWiFiConfigPortal() {
+  if (wifiPortalActive) return;
+
+  Serial.println("[WiFi] Membuka ulang portal konfigurasi atas permintaan tombol.");
+  wifiPortalActive = true; // Pause cloud HTTP while WiFiManager handles portal traffic.
+  wifiManager.setConfigPortalBlocking(false);
+  wifiManager.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_SEC);
+  wifiManager.startConfigPortal(WIFI_CONFIG_AP_NAME, WIFI_CONFIG_AP_PASSWORD);
+
+  if ((WiFi.getMode() & WIFI_AP) != 0) {
+    Serial.printf("[WiFi] AP portal aktif: %s\\n", WIFI_CONFIG_AP_NAME);
+    Serial.println("[WiFi] Buka http://192.168.4.1 jika captive portal tidak terbuka otomatis.");
+  } else {
+    wifiPortalActive = false;
+    Serial.println("[WiFi] Gagal membuka AP portal. Coba reboot ESP32.");
+  }
 }
 
 void maintainWiFi(uint32_t now) {
+  if (wifiPortalActive) {
+    const bool portalConnected = wifiManager.process();
+    if (portalConnected || WiFi.status() == WL_CONNECTED) {
+      wifiPortalActive = false;
+      wifiPreviouslyConnected = true;
+      lastWiFiRetryMs = now;
+      printWiFiConnected("WiFiManager portal");
+      return;
+    }
+
+    // The portal may close after its 10-minute timeout or a user aborts it.
+    if ((WiFi.getMode() & WIFI_AP) == 0) {
+      wifiPortalActive = false;
+      lastWiFiRetryMs = now;
+      Serial.println("[WiFi] Portal ditutup atau timeout. Kontrol lokal tetap aktif.");
+    }
+    return;
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     if (!wifiPreviouslyConnected) {
       wifiPreviouslyConnected = true;
-      Serial.printf("[WiFi] CONNECTED | SSID: %s | IP: %s | RSSI: %d dBm\n",
-                    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      printWiFiConnected("reconnect");
     }
     return;
   }
 
   if (wifiPreviouslyConnected) {
     wifiPreviouslyConnected = false;
-    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\n",
+    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\\n",
                   (int)WiFi.status());
   }
 
   if ((uint32_t)(now - lastWiFiRetryMs) >= WIFI_RETRY_INTERVAL_MS) {
     lastWiFiRetryMs = now;
-    Serial.printf("[WiFi] Mencoba koneksi ulang ke SSID: %s\n", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.println("[WiFi] Mencoba koneksi ulang menggunakan kredensial tersimpan...");
+    WiFi.reconnect();
   }
 }
 
@@ -551,7 +624,8 @@ void setup() {
   roomA.lastMotionMs = roomB.lastMotionMs = millis();
 
   Serial.println("Smart Classroom Fan: AUTO + MANUAL override + cloud.");
-  Serial.println("Wi-Fi manual: SSID dan password di firmware/secrets.h.");
+  Serial.println("Wi-Fi: ESP32 menyediakan captive portal untuk konfigurasi jaringan.");
+  Serial.println("Tahan kedua tombol kelas A dan B selama 5 detik untuk membuka ulang portal.");
   startWiFi();
 
   netEventQueue = xQueueCreate(8, sizeof(NetEvent));
@@ -583,9 +657,21 @@ void loop() {
   if (motionAChanged) Serial.printf("[%lu ms][PIR] Kelas A: %s\n", (unsigned long)millis(), motionA ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
   if (motionBChanged) Serial.printf("[%lu ms][PIR] Kelas B: %s\n", (unsigned long)millis(), motionB ? "GERAKAN TERDETEKSI" : "TIDAK ADA GERAKAN");
 
-  // Buttons are always dedicated to their own classroom; no portal long-press shortcut.
-  handleButton(roomA, now);
-  handleButton(roomB, now);
+  const bool bothButtonsPressed =
+      digitalRead(BUTTON_A_PIN) == LOW && digitalRead(BUTTON_B_PIN) == LOW;
+  if (bothButtonsPressed) {
+    if (bothButtonsHeldSinceMs == 0) bothButtonsHeldSinceMs = now;
+    else if (!wifiPortalTriggered
+             && (uint32_t)(now - bothButtonsHeldSinceMs) >= WIFI_CONFIG_HOLD_MS) {
+      wifiPortalTriggered = true;
+      openWiFiConfigPortal();
+    }
+  } else {
+    bothButtonsHeldSinceMs = 0;
+    wifiPortalTriggered = false;
+    handleButton(roomA, now);
+    handleButton(roomB, now);
+  }
 
   if ((uint32_t)(now - lastDhtReadMs) >= DHT_INTERVAL_MS) {
     lastDhtReadMs = now;
