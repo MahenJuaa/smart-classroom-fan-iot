@@ -500,14 +500,14 @@ void handleButton(RoomState& room, uint32_t now) {
 }
 
 void printWiFiConnected(const char* source) {
-  Serial.printf("[WiFi] CONNECTED via %s | SSID: %s | IP: %s | RSSI: %d dBm\\n",
+  Serial.printf("[WiFi] CONNECTED via %s | SSID: %s | IP: %s | RSSI: %d dBm\n",
                 source, WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
 }
 
 void startWiFi() {
   Serial.println();
   Serial.println("[WiFi] Memulai WiFiManager captive portal...");
-  Serial.printf("[WiFi] AP setup: %s\\n", WIFI_CONFIG_AP_NAME);
+  Serial.printf("[WiFi] AP setup: %s\n", WIFI_CONFIG_AP_NAME);
   Serial.println("[WiFi] Password AP setup: SCFsetup26");
   Serial.println("[WiFi] Pilih jaringan tujuan 2.4 GHz melalui captive portal.");
 
@@ -532,10 +532,10 @@ void startWiFi() {
   } else {
     wifiPortalActive = (WiFi.getMode() & WIFI_AP) != 0;
     if (wifiPortalActive) {
-      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\\n", WIFI_CONFIG_AP_NAME);
+      Serial.printf("[WiFi] Portal aktif. Sambungkan HP/laptop ke %s\n", WIFI_CONFIG_AP_NAME);
       Serial.println("[WiFi] Jika portal tidak muncul otomatis, buka http://192.168.4.1");
     } else {
-      Serial.printf("[WiFi] AP portal belum aktif. Status=%d\\n", (int)WiFi.status());
+      Serial.printf("[WiFi] AP portal belum aktif. Status=%d\n", (int)WiFi.status());
     }
   }
 }
@@ -550,7 +550,7 @@ void openWiFiConfigPortal() {
   wifiManager.startConfigPortal(WIFI_CONFIG_AP_NAME, WIFI_CONFIG_AP_PASSWORD);
 
   if ((WiFi.getMode() & WIFI_AP) != 0) {
-    Serial.printf("[WiFi] AP portal aktif: %s\\n", WIFI_CONFIG_AP_NAME);
+    Serial.printf("[WiFi] AP portal aktif: %s\n", WIFI_CONFIG_AP_NAME);
     Serial.println("[WiFi] Buka http://192.168.4.1 jika captive portal tidak terbuka otomatis.");
   } else {
     wifiPortalActive = false;
@@ -588,7 +588,7 @@ void maintainWiFi(uint32_t now) {
 
   if (wifiPreviouslyConnected) {
     wifiPreviouslyConnected = false;
-    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\\n",
+    Serial.printf("[WiFi] Koneksi terputus. Status=%d. Kontrol lokal tetap aktif.\n",
                   (int)WiFi.status());
   }
 
